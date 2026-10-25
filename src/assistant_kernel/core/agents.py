@@ -27,7 +27,7 @@ class AgentConfig:
     role_text: str
     provider: str | None
     model: str | None
-    reasoning_effort: str
+    reasoning_effort: str | None   # None: filled from config/models.yaml (core/models.py), else the model's default
     context_policy: str
     model_context_window_tokens: int | None
     model_auto_compact_token_limit: int | None
@@ -36,6 +36,7 @@ class AgentConfig:
     config_sha256: str
     skills_text: str = ""                  # rendered skills, on-demand index and shared context
     skill_labels: tuple[str, ...] = ()     # name@version of everything loaded, recorded on the run
+    profile: str | None = None             # model profile from config/models.yaml (harness.profile), 0.46.1
 
 
 def _yaml(path: Path) -> dict[str, Any]:
@@ -91,7 +92,8 @@ class AgentLoader:
             agent_id=str(data.get("agent_id") or agent_dir.name), agent_key=str(data.get("agent_key") or agent_key),
             kind=str(data.get("kind") or "manager"), role_text=role_text,
             provider=setting("provider"), model=setting("model"),
-            reasoning_effort=str(setting("reasoning_effort") or "medium"), context_policy=context_policy,
+            reasoning_effort=setting("reasoning_effort") or None, context_policy=context_policy,
+            profile=setting("profile") or None,
             model_context_window_tokens=_optional_int(setting("model_context_window_tokens")),
             model_auto_compact_token_limit=_optional_int(setting("model_auto_compact_token_limit")),
             timeout_seconds=int(setting("timeout_seconds") or self.settings.agent_timeout_seconds),

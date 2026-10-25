@@ -75,8 +75,9 @@ class KernelSettings(BaseModel):
     health_stale_after_seconds: float = 90
     agent_timeout_seconds: int = 600
     default_codex_provider: str = "openai"
-    default_codex_model: str | None = "gpt-5.6-sol"
-    default_codex_reasoning_effort: str = "medium"
+    # Fallbacks only: the model settings live in config/models.yaml (core/models.py, 0.46.1); None lets Codex choose.
+    default_codex_model: str | None = None
+    default_codex_reasoning_effort: str | None = None
     default_codex_context_policy: str = "max"
     context_soft_ratio: float = 0.70
     context_hard_ratio: float = 0.85
@@ -134,13 +135,8 @@ class KernelSettings(BaseModel):
             worker_lease_seconds=int(os.getenv("ASSISTANT_WORKER_LEASE_SECONDS", "60")),
             agent_timeout_seconds=int(os.getenv("ASSISTANT_AGENT_TIMEOUT_SECONDS", "600")),
             default_codex_provider=os.getenv("ASSISTANT_DEFAULT_CODEX_PROVIDER", "openai"),
-            default_codex_model=(
-                os.getenv("ASSISTANT_DEFAULT_CODEX_MODEL", "gpt-5.6-sol").strip()
-                or "gpt-5.6-sol"
-            ),
-            default_codex_reasoning_effort=os.getenv(
-                "ASSISTANT_DEFAULT_CODEX_REASONING_EFFORT", "medium"
-            ),
+            default_codex_model=os.getenv("ASSISTANT_DEFAULT_CODEX_MODEL", "").strip() or None,
+            default_codex_reasoning_effort=os.getenv("ASSISTANT_DEFAULT_CODEX_REASONING_EFFORT", "").strip() or None,
             default_codex_context_policy=os.getenv(
                 "ASSISTANT_DEFAULT_CODEX_CONTEXT_POLICY", "max"
             ),

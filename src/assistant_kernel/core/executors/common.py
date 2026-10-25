@@ -75,6 +75,8 @@ def load_agent(settings, project_id: str, role: str, *, stage: str | None = None
     skills_text = selection.render(vault, native=native)
     if native:
         skills_text = "\n\n".join(part for part in (path_note(vault, config.agent_id), skills_text) if part)
+    from assistant_kernel.core import models   # model settings: config/models.yaml (0.46.1)
+    config, _ = models.resolve(settings, "triage" if purpose == "triage" else role, config)
     return AgentConfig(**{**config.__dict__, "skills_text": skills_text,
                           "skill_labels": tuple(selection.labels),
                           "config_sha256": skill_rules.digest(files + selection.files)})

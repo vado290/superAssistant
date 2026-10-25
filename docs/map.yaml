@@ -290,6 +290,12 @@ entries:
 - path: scripts/r0457_supervisor_timeout.py
   kind: module
   purpose: 0.45.7 一次性迁移：把各项目 Supervisor 每轮限时从 90 秒改为 5 分钟（项目自己设过的值保留）
+- path: scripts/r0461_models_migrate.py
+  kind: module
+  purpose: 0.46.1 一次性迁移：新建 config/models.yaml，并去掉各项目 agent 配置里仍是旧默认值的模型设置
+- path: src/assistant_kernel/core/models.py
+  kind: module
+  purpose: Kernel 统一的模型设置：读取 config/models.yaml，按 agent 配置 → profile → defaults → default_profile 合并（0.46.1）
 - path: src/assistant_kernel/core/credentials.py
   kind: module
   purpose: 'Project credentials (docs/ROUND5_PLAN.md D8, §5.5): one JSON file per

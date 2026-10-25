@@ -2,9 +2,10 @@
 name: assistant-agent-design
 description: Design an agent inside a product (run by an agent job in jobs.yaml) — directory layout, config.yaml, role.md and its own skills; also a reference when changing the role notes of this project's PM or Supervisor.
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
   load: {roles: [pm], stages: [design, build], on_demand: true}
   changelog:
+    - "2.2.0 2026-10-25 The example config no longer sets a model; a product agent that needs another model names a profile (0.46.1)"
     - "2.1.0 2026-10-23 Written in English, the skills' source language; what the user reads follows the user's language (ROUND6, 0.46.0)"
     - "2.0.2 2026-10-18 Skills moved to one flat folder per agent, agents/<agent>/.agents/skills/ (ROUND5 R5.1)"
     - "2.0.1 2026-10-16 The runtime manifest is jobs.yaml at the project root (the vault's runtime/ folder holds Kernel's internal data)"
@@ -33,12 +34,11 @@ kind: worker
 status: active
 role: role.md
 harness:
-  provider: openai
-  reasoning_effort: medium
   timeout_seconds: 900
 tools: [get_authorized_workspace, list_authorized_tree, read_authorized_file, vault_read_text]
 ```
-List only the read-only tools it needs.
+List only the read-only tools it needs. The model comes from Kernel's model settings (config/models.yaml); to run this
+agent on a different one, add `profile: <name>` under `harness`, naming a profile defined there, and say why in the design.
 
 ## Role versus skills
 - **role.md** says who I am, whom I serve, what I am and am not responsible for, and what makes a result good.

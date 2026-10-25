@@ -3,8 +3,6 @@ agent_key: project:{project_id}:manager
 display_name: Project PM
 harness:
   context_policy: max
-  provider: openai
-  reasoning_effort: medium
   timeout_seconds: 1800
 kind: manager
 role: role.md

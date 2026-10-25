@@ -67,6 +67,8 @@ def load_product_agent(settings, project_id: str, name: str) -> AgentConfig:
     vault = loader.runtime.ensure(project_id).vault_root
     capabilities = skill_rules.project_config(vault)["capabilities"]
     selection = skill_rules.select(vault, settings.data_root, role=name, purpose="job", capabilities=capabilities)
+    from assistant_kernel.core import models   # model settings: config/models.yaml (0.46.1)
+    config, _ = models.resolve(settings, name, config)
     return AgentConfig(**{**config.__dict__, "skills_text": selection.render(vault), "skill_labels": tuple(selection.labels),
                           "config_sha256": skill_rules.digest(files + selection.files)})
 

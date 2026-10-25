@@ -181,6 +181,9 @@ gw.no_channel: (the target project's channel is not configured)
 gw.reminder: '⏰ A card has been waiting about {hours} hours: {link}'
 gw.credential_placeholder: Saved as project credential {key}; never in the conversation record
 gw.optional_options: 'Optional: {options}'
+cmd.models_header: 'Model settings ({file}; each value comes from the first that sets it: the agent''s config, its profile, defaults[role], default_profile, then Codex''s own default). Change them in that file; they apply from the next turn.'
+cmd.models_line: '- {project} · {role}: {model} · effort {effort} — profile {profile}; model from {model_source}, effort from {effort_source}'
+cmd.models_error: '- {project} · {role}: ⚠ {error}'
 cmd.secrets_usage: 'Usage: /secrets · /secrets delete <key>'
 cmd.secrets_confirm: 'Delete credential {key}? Send: /secrets delete {key} {word}'
 cmd.secrets_deleted: Credential {key} deleted.

@@ -28,7 +28,8 @@ stages: requirements → design → build → (Kernel validation) → review →
   released; a code project's repository and external folders granted for writing are edited in the build stage and
   committed when the release is approved.
 - Messages in `#pm` go to the current task (or start one); messages in `#supervisor` are consultations.
-- Text commands: `/status`, `/pending`, `/cancel confirm`, `/evolve`, `/iterations`, `/grants`, `/jobs`, `/secrets`.
+- Text commands: `/status`, `/pending`, `/cancel confirm`, `/evolve`, `/iterations`, `/grants`, `/jobs`, `/secrets`,
+  `/models`.
 
 ## Language and dashboard
 
@@ -153,6 +154,26 @@ the card is submitted — including an answer to a credential question. A fix is
 | `harness/` | `codex exec` runner, tool-server launch, process control |
 | `services/` | reused libraries: workspace scope, documents, candidates, validation |
 | `prompts/core/`, `prompts/skills/` | output contracts; skill templates copied into each agent's folder |
+
+## Model settings
+
+Which engine, provider, model and reasoning effort the agents use is set in one file,
+`assistant-data/config/models.yaml`, read on every run (a change applies from the next turn, no restart):
+
+```yaml
+schema_version: kernel-models.v1
+profiles:
+  strong: {engine: codex, provider: openai, model: gpt-6-astra, reasoning_effort: high}
+default_profile: strong
+defaults: {}      # optional: role → profile; roles are pm, supervisor, triage, or a product agent's name
+```
+
+Each value comes from the first place that sets it: the agent's own `config.yaml` (only for a real exception:
+`harness.profile`, or a single field), `defaults[role]`, `default_profile`, then Codex's own default (also used when the
+file does not exist). Send `/models` in Discord to see what every project's PM, Supervisor and triage run with, where
+each value comes from, and whether Codex accepts it. Today the only engine is `codex` (models from the Codex CLI
+catalog, OpenAI provider); the `engine` field is there so another one can be added without a new format — see
+`docs/PUBLIC_RELEASE_ASSESSMENT.md` §2 for what a Claude Code engine would take.
 
 ## Operations
 

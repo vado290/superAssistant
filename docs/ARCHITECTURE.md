@@ -58,8 +58,9 @@ A project-creation task (`bootstrap`) only drafts its charter; approval creates 
 | `vault_sync.py` | Kernel's idempotent file writes that follow from state; template rollout per Kernel version (D24); imports commits made outside tasks into the change stream; pushes project history to GitHub |
 | `projectgit.py` | each project folder (and each folder it may write to) is a repository: snapshot before a release, commit after it, private GitHub remote via `gh` |
 | `projectmap.py` | the project map `map.yaml` (one index entry per file; every product Python file listed), checked at validation, `map_lookup` tool |
+| `models.py` | the model settings `assistant-data/config/models.yaml`: profiles, default profile, profile per role; merged into each agent's config at load time (0.46.1) |
 | `credentials.py` | the project's credentials `runtime/credentials.json`: look first, ask with a `credential` question, never in the conversation |
-| `gateway/` | Discord gateway: messages, cards, buttons, text commands (`/status /pending /cancel /evolve /jobs /iterations /grants /secrets`); `setup.py` checks a bot token for the dashboard |
+| `gateway/` | Discord gateway: messages, cards, buttons, text commands (`/status /pending /cancel /evolve /jobs /iterations /grants /secrets /models`); `setup.py` checks a bot token for the dashboard |
 | `i18n.py` | text and language rules (ROUND6): interface text from `i18n/en.yaml`, the English headings Kernel parses (older Chinese headings still found), contract placeholders (`{{heading:key}}`), the language note that makes models reply in the user's language |
 | `sql/` | migrations, applied in order, never edited after applying |
 

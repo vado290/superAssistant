@@ -44,8 +44,10 @@ class GatewayService:
         project_id, role = route
         command = text.strip().split()
         if command[0] in ("/status", "/pending", "/cancel", "/evolve", "/jobs", "/iterations", "/grants",
-                          "/secrets"):   # commands
-            if command[0] == "/secrets":
+                          "/secrets", "/models"):   # commands
+            if command[0] == "/models":
+                reply = await self.models_text()
+            elif command[0] == "/secrets":
                 reply = await self.secrets_command(project_id, command[1:])
             elif command[0] == "/grants":
                 reply = await self.grants_command(project_id, command[1:])
@@ -253,6 +255,34 @@ class GatewayService:
             default = str(drafts.get(q["id"]) or render.suggested_answer(item, q))[:4000]
         return {"id": q["id"], "label": q["text"][:45], "required": bool(q.get("required", True)), "default": default,
                 "placeholder": placeholder, "long_text": q["text"]}
+
+    async def models_text(self) -> str:
+        """/models (0.46.1): what every project's PM, Supervisor and triage run with, where each value comes from, and
+        whether Codex accepts it — the same check a real run makes. Read-only: the settings are changed in the file."""
+        from assistant_kernel.core import models
+        from assistant_kernel.core.agents import AgentLoader
+        from assistant_kernel.harness import CodexCliHarness
+        from assistant_kernel.storage import ProjectRuntimeManager
+        settings = self.kernel.settings
+        harness = CodexCliHarness(ProjectRuntimeManager(settings.data_root))
+        lines = [t("cmd.models_header", file=str(models.path(settings)))]
+        for project in await self.kernel.active_projects():
+            for role, agent in (("pm", "manager"), ("supervisor", "supervisor"), ("triage", "manager")):
+                try:
+                    config, _ = AgentLoader(settings).load(project, f"project:{project}:{agent}")
+                    config, source = models.resolve(settings, role, config)
+                    profile = await harness.resolve_model_profile(
+                        project_id=project, provider=config.provider or settings.default_codex_provider,
+                        model=config.model, reasoning_effort=config.reasoning_effort,
+                        context_policy=config.context_policy,
+                        custom_context_window_tokens=config.model_context_window_tokens,
+                        custom_auto_compact_token_limit=config.model_auto_compact_token_limit)
+                    lines.append(t("cmd.models_line", project=project, role=role, model=profile.model,
+                                   effort=profile.reasoning_effort or "-", profile=source["profile"],
+                                   model_source=source["model"], effort_source=source["reasoning_effort"]))
+                except Exception as exc:   # shown to the user: this is what a run would fail with
+                    lines.append(t("cmd.models_error", project=project, role=role, error=str(exc)[:300]))
+        return "\n".join(lines)
 
     async def secrets_command(self, project_id: str, args: list[str]) -> str:
         """/secrets · /secrets delete <key> [confirm] (ROUND5 D8): the project's credentials, never their values."""
