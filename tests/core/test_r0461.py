@@ -12,7 +12,7 @@ import yaml
 from assistant_kernel.core import models
 from assistant_kernel.core.executors.common import load_agent
 
-from .test_gateway import gateway  # noqa: F401  (a fixture)
+from .test_gateway import PM_CH, USER, gateway  # noqa: F401  (gateway is a fixture)
 from .test_r0453 import TEMPLATE
 
 STRONG = ("schema_version: kernel-models.v1\nprofiles:\n"
@@ -105,6 +105,11 @@ async def test_models_command_shows_each_role_and_its_source(gateway, kernel, ke
         path.write_text(path.read_text("utf-8").replace("  model: test-model\n", ""), "utf-8")
     text = await gateway.models_text()
     assert "p1 · triage: gpt-6-astra" in text and "p1 · supervisor: gpt-6-astra" in text
+    # the way it is used: a "/models" message in a project channel is answered there, not handed to the PM
+    assert await gateway.on_message(channel_id=PM_CH, user_id=USER, message_id="m-models", text="/models") == \
+        {"action": "command", "command": "/models"}
+    sent = gateway.transport.messages[gateway.transport.order[-1]]
+    assert sent["channel"] == PM_CH and "p1 · pm: gpt-6-astra · effort high" in sent["text"]
     settings_file(kernel_settings, STRONG.replace("model: gpt-6-astra", "model: nope"))
     assert "⚠ model is not available in the active Codex catalog: nope" in await gateway.models_text()
 

@@ -111,6 +111,11 @@ Codex 专属的耦合点与 Claude Code 对应方案：
 | B. Codex + 自定义 `model_providers` | Codex 已在 2026-02 移除 `wire_api="chat"`，只支持 Responses API；大多数国产接口只有 chat/completions，需要 LiteLLM 之类的转换代理；且 `codex_models.resolve` 对非 openai provider 只允许 `context_policy: model_default` | 可行但多一层代理，不推荐作为主路 |
 | C. 无工具的简单调用走直连 chat | 已有 `model_providers/chat.py`（OpenAI 兼容）和 `provider-secrets.json` 的 `chat_models` | 适合摘要、分类、日报、产品里的批量文本处理，不需要 agent 能力 |
 
+> **已实现的部分（0.46.1，2026-10-25）**：`config/models.yaml` 的 `profiles`、`default_profile`（下例中“不写就用 strong”的显式写法）、
+> 按角色的 `defaults`（pm / supervisor / triage / 产品 agent 名）和 agent 配置里的 `harness.profile`；当前默认档位为
+> gpt-6-astra + high。尚未实现：codex 以外的引擎（claude_code、chat）、按用途细分（如 `supervisor.consult`、`digest`）、
+> 档位里的 `base_url` / `key_ref`。用法见 README 的 “Model settings”，查看用 Discord `/models`。下面是原设计，保留作参考。
+
 **配置设计**（新增 `assistant-data/config/models.yaml`，密钥仍放在 `provider-secrets.json`）：
 
 ```yaml
