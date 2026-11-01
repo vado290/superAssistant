@@ -159,6 +159,12 @@ listed above. The source changes contain no SQL migration or service definition
 change. The production dependency check passed before promotion; the 0.46.1
 deployed wheel is retained as the rollback target.
 
+An additional pre-promotion version check caught the separate API version
+constant still reporting 0.46.1. The release runner was stopped at its test stage,
+before stopping or changing production services. `assistant_kernel.__version__`
+now agrees with the 0.46.2 distribution version; an explicit version-consistency
+test guards this release requirement. The schema remains core6.0008.
+
 Live acceptance: upload a non-sensitive PNG/JPEG/WebP in the validation project's
 Supervisor channel. Put a random code and recognizable shapes in the image but
 do not include the answer in the caption or filename. Ask for an image-only

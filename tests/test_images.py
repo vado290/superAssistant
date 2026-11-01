@@ -27,6 +27,14 @@ def test_deployment_lock_covers_declared_runtime_dependencies():
         assert locked.get(canonicalize_name(requirement.name)) == requirement.specifier, raw
 
 
+def test_api_version_matches_distribution_version():
+    from pathlib import Path
+    import tomli
+    from assistant_kernel import __version__
+    manifest = tomli.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    assert __version__ == manifest["project"]["version"]
+
+
 def picture(format="PNG", color="red"):
     out = io.BytesIO()
     Image.new("RGB", (16, 12), color).save(out, format=format)
