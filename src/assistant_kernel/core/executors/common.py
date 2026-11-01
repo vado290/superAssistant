@@ -250,10 +250,14 @@ def workspace_snapshot(settings, project_id: str, task_id: str, variant: str, *,
 async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str, *,
                      task_id: str | None, stage: str | None, session_id: str | None,
                      tools: frozenset[str], sandbox: str, candidates: bool = False,
-                     subagents: int = 0, cwd: Path | None = None) -> AgentTurnResult:
+                      subagents: int = 0, cwd: Path | None = None, images: tuple[dict, ...] = ()) -> AgentTurnResult:
     """One Codex invocation with the project's model settings and the scoped Kernel tools."""
     settings, harness = ctx.services["settings"], ctx.services["harness"]
     project_id = run["project_id"]
+    image_paths = ()
+    if images:
+        from assistant_kernel.core.images import validate_refs
+        image_paths = await asyncio.to_thread(validate_refs, settings, project_id, images)
     invocation_id = f"{run['run_id']}-a{run['attempt']}-{uuid.uuid4().hex[:8]}"
     allowed = effective_tools(tools, config.allowed_tools)
     model, effort, window, compact = config.model, config.reasoning_effort, None, None
@@ -300,7 +304,7 @@ async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str,
             context_policy=config.context_policy, model_context_window_tokens=window,
             model_auto_compact_token_limit=compact, sandbox=sandbox, timeout_seconds=config.timeout_seconds,
             invocation_id=invocation_id, cancel_event=ctx.cancel, scoped_tools=allowed, scope_context=scope_context,
-            multi_agent_enabled=subagents > 0, max_concurrent_subagents=subagents))
+            multi_agent_enabled=subagents > 0, max_concurrent_subagents=subagents, image_paths=image_paths))
     finally:
         sharing.cancel()
         await asyncio.to_thread(sync, settings, project_id, direction="out")
@@ -313,6 +317,7 @@ async def call_for_json(ctx, run, config, prompt, **kwargs) -> tuple[dict[str, A
     if parsed is None and result.physical_session_id:
         fix = ("Your last message was not a valid JSON object. Follow the output requirements exactly: output only that "
                "JSON object and do no new work.")
-        result = await call_model(ctx, run, config, fix, **{**kwargs, "session_id": result.physical_session_id})
+        result = await call_model(ctx, run, config, fix,
+                                  **{**kwargs, "session_id": result.physical_session_id, "images": ()})
         parsed = parse_json_object(result.final_text)
     return parsed, result

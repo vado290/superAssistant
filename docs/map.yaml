@@ -1,5 +1,17 @@
 schema_version: project-map.v1
 entries:
+- path: docs/IMAGE_INPUT.md
+  kind: doc
+  purpose: Inbound-only Discord image limits, task continuity, compatibility and rollout boundary
+- path: tests/test_images.py
+  kind: test
+  purpose: Image decoding, download limits, safe references and native CLI image arguments
+- path: tests/core/test_image_input.py
+  kind: test
+  purpose: Inbound image task flow, permissions, continuation and text compatibility regression
+- path: src/assistant_kernel/core/images.py
+  kind: module
+  purpose: Bounded inbound image downloads, project-local references and model image context
 - path: src/assistant_kernel/core/skill_updates.py
   kind: module
   purpose: 技能采用批次、可信基线、完整目录核对、写入互斥与中断恢复；默认关闭

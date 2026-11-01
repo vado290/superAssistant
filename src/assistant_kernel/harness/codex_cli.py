@@ -81,6 +81,11 @@ class CodexCliHarness:
     async def run_turn(self, request: AgentTurnRequest) -> AgentTurnResult:
         runtime = self.runtime_manager.ensure(request.project_id)
         codex_home=request.codex_home or runtime.codex_home
+        if request.image_paths:
+            models = await self.model_catalog.list_models(codex_home)
+            selected = next((m for m in models if m.get("slug") == request.model), {})
+            if request.provider not in (None, "openai") or "image" not in (selected.get("input_modalities") or []):
+                raise ValueError("The selected model does not advertise image input; no text-only fallback was sent.")
         environment = (os.environ.copy() if request.base_environment is None else dict(request.base_environment))
         environment["CODEX_HOME"] = str(codex_home)
         environment.update(request.extra_environment)
@@ -204,6 +209,10 @@ class CodexCliHarness:
                 command.extend(["-c", f'model_reasoning_effort="{request.reasoning_effort}"'])
             command.append("-")
         invocation_path = archive_dir / "request.json"
+        if request.image_paths:
+            # Insert before the session id / stdin marker; both CLI modes support -i.
+            position = len(command) - (2 if request.physical_session_id else 1)
+            command[position:position] = [arg for path in request.image_paths for arg in ("--image", str(path))] + ["--"]
         invocation_path.write_text(
             json.dumps(
                 {
@@ -220,6 +229,8 @@ class CodexCliHarness:
                     "permission_profile_sha256": request.permission_profile_sha256,
                     "scoped_tools": list(request.scoped_tools),
                     "writable_roots": [str(item) for item in request.writable_roots],
+                    **({"images": [{"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                                   for path in request.image_paths]} if request.image_paths else {}),
                 },
                 ensure_ascii=False,
             ),

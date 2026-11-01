@@ -12,3 +12,7 @@ to another project, hand it to that project's Supervisor:
   what this project can do itself.
 - When no project fits and this is new work that needs continuing effort, discuss it with the user first; when the
   user confirms a new project, start it as a task of this project (goal: "New project: …").
+- Current-message images cannot be routed automatically: name the destination project and ask the user to resend
+  the images and request in its channel. Do not claim they were sent. For a text follow-up that depends on an earlier
+  image, set `route.requires_images: true`; Kernel will likewise ask for a resend. Unrelated text requests can route
+  normally even when earlier images appear in the conversation context.

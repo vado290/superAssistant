@@ -201,7 +201,9 @@ class CoreDiscordClient(discord.Client):
         if message.author.bot or message.guild is None or str(message.guild.id) != self.config.guild_id:
             return
         await self.service.on_message(channel_id=str(message.channel.id), user_id=str(message.author.id),
-                                      message_id=str(message.id), text=message.content)
+                                      message_id=str(message.id), text=message.content,
+                                      attachments=[{"filename": a.filename, "size": a.size, "url": a.url}
+                                                   for a in message.attachments])
 
     async def handle_button(self, interaction: discord.Interaction, custom_id: str) -> None:
         action = custom_id.split(":", 2)[2]

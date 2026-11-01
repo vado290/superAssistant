@@ -401,6 +401,9 @@ async def test_only_build_turns_may_write_outside_the_kernel(monkeypatch, kernel
         async def turn_inputs(self, run):
             return []
 
+        async def image_inputs(self, run):
+            return []
+
         async def project_digest(self, project_id):
             return {}
 

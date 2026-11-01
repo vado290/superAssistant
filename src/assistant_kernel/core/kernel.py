@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import logging
 import uuid
@@ -78,11 +79,16 @@ class Kernel:
 
     async def receive(self, project_id: str, *, role: str, text: str, channel: str = "api",
                       chat_id: str | None = None, user_id: str | None = None,
-                      external_event_id: str | None = None) -> dict[str, Any]:
+                      external_event_id: str | None = None, images: list[dict] = ()) -> dict[str, Any]:
         """Store one inbound user message and route it: PM channel → task, Supervisor channel → consult.
 
         A repeated external_event_id is recognised and not processed again.
         """
+        if images:
+            from assistant_kernel.core.images import MAX_IMAGES, validate_refs, ImageInputError
+            if len(images) > MAX_IMAGES:
+                raise ImageInputError("count")
+            await asyncio.to_thread(validate_refs, self.settings, project_id, images)
         async with self.db.tx() as c:
             await lock_project(c, project_id)
             message = await one(
@@ -91,12 +97,46 @@ class Kernel:
                       VALUES (%s, %s, %s, %s, 'inbound', %s, %s, %s)
                       ON CONFLICT (channel, external_event_id) WHERE external_event_id IS NOT NULL DO NOTHING
                       RETURNING *""",
-                (project_id, channel, chat_id, user_id, role, Jsonb({"text": text}), external_event_id))
+                (project_id, channel, chat_id, user_id, role,
+                 Jsonb({"text": text, **({"images": images} if images else {})}), external_event_id))
             if message is None:
                 return {"action": "duplicate"}
             routed = (await machine.user_input(c, project_id, message, triage=self.triage) if role == "pm"
                       else await machine.consult(c, project_id, message))
             return {"message_id": str(message["message_id"]), **routed}
+
+    async def received_event(self, project_id: str, channel: str, external_event_id: str) -> bool:
+        async with self.db.tx() as c:
+            return bool(await one(c, """SELECT 1 FROM core.messages WHERE project_id=%s AND channel=%s
+                AND external_event_id=%s""", (project_id, channel, external_event_id)))
+
+    async def image_inputs(self, run: dict) -> list[dict]:
+        """Image history bound to this run, never another project's or later PM turn's inputs."""
+        task_id = run.get("task_id") or run["input"].get("context_task_id")
+        message_id = run["input"].get("message_id")
+        cutoff = run.get("started_at") or run["created_at"]
+        async with self.db.tx() as c:
+            if task_id and run["purpose"] != "consult":
+                # PM claiming already pinned its batch. Supervisor evaluations include pending inputs.
+                pinned = ("AND (m.consumed_by_run_id IS NOT NULL OR m.message_id=t.source_message_id)"
+                          if run["run_type"] == "pm_turn" else "")
+                return await all_rows(c, f"""SELECT m.* FROM core.messages m
+                    JOIN core.tasks t ON t.task_id=%s AND t.project_id=m.project_id
+                    WHERE m.project_id=%s AND (m.task_id=t.task_id OR m.message_id=t.source_message_id)
+                    AND m.direction='inbound' AND (m.body ? 'images' OR m.body ? 'image_context')
+                    AND m.created_at<=%s {pinned}
+                    ORDER BY m.created_at, m.message_id""", (task_id, run["project_id"], cutoff))
+            if not message_id:
+                return []
+            # Bound the conversation window by messages, not by images from arbitrarily old chats.
+            return list(reversed(await all_rows(c, """SELECT * FROM (SELECT m.* FROM core.messages m
+                JOIN core.messages source ON source.message_id=%s AND source.project_id=m.project_id
+                WHERE m.project_id=%s AND m.direction='inbound'
+                AND m.user_id IS NOT DISTINCT FROM source.user_id
+                AND m.chat_id IS NOT DISTINCT FROM source.chat_id AND m.role=source.role
+                AND m.created_at<=source.created_at ORDER BY m.created_at DESC, m.message_id DESC LIMIT 20) recent
+                WHERE body ? 'images' OR body ? 'image_context' ORDER BY created_at DESC, message_id DESC""",
+                (message_id, run["project_id"]))))
 
     async def create_task(self, project_id: str, **fields: Any) -> dict[str, Any]:
         async with self.db.tx() as c:
@@ -409,7 +449,8 @@ class Kernel:
             turns = await all_rows(c, """SELECT run_id, input, result, created_at FROM core.runs
                                          WHERE task_id=%s AND run_type='pm_turn' AND status='succeeded'
                                          ORDER BY created_at""", (task_id,))
-            messages = await all_rows(c, """SELECT consumed_by_run_id, body->>'text' AS text FROM core.messages
+            messages = await all_rows(c, """SELECT consumed_by_run_id, body->>'text' AS text,
+                                            body->'images' AS images FROM core.messages
                                             WHERE task_id=%s AND direction='inbound' AND consumed_by_run_id IS NOT NULL
                                             ORDER BY created_at""", (task_id,))
             actions = await all_rows(c, """SELECT payload, created_at FROM core.task_events
@@ -421,6 +462,9 @@ class Kernel:
                                      AND p.project_id=t.project_id WHERE t.task_id=%s AND t.origin='evolution'""", (task_id,))
         supplements: dict[str, list[str]] = {}
         for m in messages:
+            if m.get("images"):
+                m["text"] = (m["text"] or "") + "\nUser image references (not image contents): " + json.dumps(
+                    [{"filename": ref["filename"], "sha256": ref["sha256"]} for ref in m["images"]], ensure_ascii=False)
             if m["text"]:
                 supplements.setdefault(str(m["consumed_by_run_id"]), []).append(m["text"])
         return {"turns": [{**t, "supplements": supplements.get(str(t["run_id"]), [])} for t in turns],

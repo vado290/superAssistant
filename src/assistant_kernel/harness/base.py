@@ -36,6 +36,7 @@ class AgentTurnRequest:
     multi_agent_enabled: bool = False
     max_concurrent_subagents: int = 3
     process_started_callback: Callable[[int, int | None], Awaitable[None]] | None = None
+    image_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)

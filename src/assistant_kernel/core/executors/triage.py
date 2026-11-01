@@ -10,6 +10,7 @@ from assistant_kernel.core.executors.common import (
     project_catalog, prompt_text,
 )
 from assistant_kernel.core.executors.supervisor import CATALOG_HEADING, render_messages
+from assistant_kernel.core.images import select_images
 
 
 async def execute_triage(run: dict[str, Any], ctx) -> dict[str, Any]:
@@ -39,10 +40,11 @@ async def execute_triage(run: dict[str, Any], ctx) -> dict[str, Any]:
         sections.append(prompt_text("routing"))
     if "project_management" in caps:
         sections.append(prompt_text("triage-projects"))
+    images, image_note, _ = select_images(await kernel.image_inputs(run))
     parsed, model_result = await call_for_json(
-        ctx, run, config, "\n\n".join(sections), task_id=None, stage=None, session_id=None,
-        tools=READ_ONLY_TOOLS, sandbox="read-only")
+        ctx, run, config, "\n\n".join(sections) + image_note, task_id=None, stage=None, session_id=None,
+        tools=READ_ONLY_TOOLS, sandbox="read-only", images=images)
     if parsed is None:
         return {"decision": "invalid_output", "raw": model_result.final_text[:2000]}
     return {**parsed, "config_sha256": config.config_sha256, "skills": list(config.skill_labels),
-            "usage": model_result.usage.model_dump(), "_capabilities": sorted(caps)}
+            "usage": model_result.usage.model_dump(), "_capabilities": sorted(caps), "_input_images": list(images)}

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -34,16 +36,23 @@ class Reply:
 class GatewayService:
     def __init__(self, kernel: Kernel, config: GatewayConfig, transport: Transport):
         self.kernel, self.config, self.transport = kernel, config, transport
+        self._inbound_locks = defaultdict(asyncio.Lock)
 
     # ------------------------------------------------------------ inbound
 
-    async def on_message(self, *, channel_id: str, user_id: str, message_id: str, text: str) -> dict | None:
+    async def on_message(self, *, channel_id: str, user_id: str, message_id: str, text: str,
+                         attachments: list[dict] = ()) -> dict | None:
         route = self.config.route(channel_id)
-        if route is None or not self.config.allowed(user_id) or not text.strip():
+        if route is None or not self.config.allowed(user_id) or not (text.strip() or attachments):
             return None
+        # Only an authorized channel gets a lock. Later text cannot overtake a pending image download.
+        async with self._inbound_locks[channel_id]:
+            return await self._receive_message(channel_id, user_id, message_id, text, attachments, route)
+
+    async def _receive_message(self, channel_id, user_id, message_id, text, attachments, route):
         project_id, role = route
         command = text.strip().split()
-        if command[0] in ("/status", "/pending", "/cancel", "/evolve", "/jobs", "/iterations", "/grants",
+        if command and command[0] in ("/status", "/pending", "/cancel", "/evolve", "/jobs", "/iterations", "/grants",
                           "/secrets", "/models"):   # commands
             if command[0] == "/models":
                 reply = await self.models_text()
@@ -68,8 +77,22 @@ class GatewayService:
                 reply = t("gw.cancel_confirm", word=t("cmd.confirm_word"))
             await self.transport.send(channel_id, reply)
             return {"action": "command", "command": command[0]}
+        images = []
+        if attachments:
+            from assistant_kernel.core.images import download_images, ImageInputError
+            if await self.kernel.received_event(project_id, "discord", f"msg:{message_id}"):
+                return {"action": "duplicate"}
+            try:
+                images = await download_images(self.kernel.settings, project_id, attachments)
+            except (ImageInputError, OSError, ValueError):
+                # No CDN signed URL, filesystem path or partial prompt is exposed to the user/model.
+                await self.transport.send(channel_id, t("gw.image_rejected"))
+                return {"action": "image_rejected"}
+            if not text.strip():
+                text = t("gw.image_only")
         return await self.kernel.receive(project_id, role=role, text=text, channel="discord", chat_id=channel_id,
-                                         user_id=user_id, external_event_id=f"msg:{message_id}")
+                                         user_id=user_id, external_event_id=f"msg:{message_id}",
+                                         **({"images": images} if images else {}))
 
     async def _item(self, project_id: str, item_id: str) -> tuple[dict | None, dict | None]:
         card = await self.kernel.card(project_id)

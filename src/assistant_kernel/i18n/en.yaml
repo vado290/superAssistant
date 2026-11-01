@@ -353,6 +353,9 @@ files.topic_supervisor: 'Supervisor: cards and questions'
 files.release_git_warning: '⚠ The release is done, but there were git commit problems (the release is not affected): {problems}'
 files.unreleased_git_warning: '⚠ The release did not finish, and there were also git snapshot problems: {problems}'
 pm.review_not_taken: This turn's review verdict was not accepted; the working notes are kept only as leads to re-check.
+gw.image_rejected: 'The message was not submitted to the model. Upload up to 4 static PNG, JPEG or WebP images, at most 5 MiB and 25 million pixels each. PDF and other attachments are not supported. If the images meet these limits, the download or validation failed; please resend the whole message.'
+gw.image_only: '[User uploaded image(s) without a caption. Inspect the images and ask what they want to do if the intent is unclear.]'
+gw.image_route: 'This image request was not forwarded. Please resend the images and your request in the destination project channel; automatic image transfer between projects is not supported yet.'
 pm.review_workspace: The review workspace is missing or differs from the validated commit, so this turn cannot pass the review; keep the changes and restore the workspace, or go back to build and submit for validation again.
 kernel.evolution_goal: 'Weekly review: propose improvements from the recent run records'
 kernel.expired: '⌛ The task waited for you more than {days} days without a reply and ended on its own: {goal}. All its documents are kept; bring it up again whenever you need it.'

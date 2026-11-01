@@ -669,10 +669,14 @@ async def _consult_result(c, run, result) -> None:
     chat = {"channel": message["channel"], "chat_id": message["chat_id"], "user_id": message["user_id"]}
     link = {}
     if isinstance(result.get("route"), dict) and "routing" in (result.get("_capabilities") or ()):
-        link = {"link_message": str(await _route(c, run["project_id"], message, result["route"]))}
+        if message["body"].get("images") or (result["route"].get("requires_images") and result.get("_input_images")):
+            result = {**result, "reply": t("gw.image_route")}
+        else:
+            link = {"link_message": str(await _route(c, run["project_id"], message, result["route"]))}
     await notify(c, run["project_id"], "supervisor", result["reply"], chat=chat, **link)
     await _record_profile(c, run, message, result.get("profile_observations"))
     if result.get("propose_new_task"):
+        await _remember_image_context(c, message, result)
         await _propose_new_task(c, run, result["propose_new_task"], message["message_id"])
     shared = result.get("propose_shared_update")
     if isinstance(shared, dict) and "shared_context" in (result.get("_capabilities") or ()):
@@ -722,6 +726,17 @@ async def _source_user(c, task) -> str | None:
     return (row or {}).get("user_id")
 
 
+async def _remember_image_context(c, message, result):
+    """Carry the executor-selected image context into a later task, without inventing an upload."""
+    refs = result.get("_input_images")
+    if refs and refs != message["body"].get("images"):
+        if any(ref.get("project_id") != message["project_id"] for ref in refs):
+            raise InvalidResult("image context belongs to another project")
+        message["body"] = {**message["body"], "image_context": refs}
+        await c.execute("UPDATE core.messages SET body=%s WHERE message_id=%s",
+                        (Jsonb(message["body"]), message["message_id"]))
+
+
 async def _task_from_message(c, project_id: str, message: dict[str, Any], *, goal: str,
                              reason: str | None = None, kind: str = "delivery") -> dict[str, Any]:
     task = await create_task(c, project_id, goal=goal, origin="user", source_message_id=message["message_id"],
@@ -742,6 +757,7 @@ async def _triage_result(c, run, result) -> None:
             raise InvalidResult("chat needs a reply")
         await notify(c, project_id, "pm", reply, chat=chat)
     elif decision == "start_task":
+        await _remember_image_context(c, message, result)
         goal = str(result.get("goal") or "").strip() or message["body"].get("text", "")
         kind = "bootstrap" if result.get("task_kind") == "bootstrap" else "delivery"
         if kind == "bootstrap" and "project_management" not in (result.get("_capabilities") or ()):
@@ -761,9 +777,12 @@ async def _triage_result(c, run, result) -> None:
     elif decision == "route":
         if "routing" not in (result.get("_capabilities") or ()) or not isinstance(result.get("route"), dict):
             raise InvalidResult("route needs the routing capability and a route object")
-        handoff = await _route(c, project_id, message, result["route"])
-        await notify(c, project_id, "pm", reply or t("mx.routed"), chat=chat,
-                     link_message=str(handoff))
+        if message["body"].get("images") or (result["route"].get("requires_images") and result.get("_input_images")):
+            await notify(c, project_id, "pm", t("gw.image_route"), chat=chat)
+        else:
+            handoff = await _route(c, project_id, message, result["route"])
+            await notify(c, project_id, "pm", reply or t("mx.routed"), chat=chat,
+                         link_message=str(handoff))
     else:
         raise InvalidResult(f"unsupported triage decision {decision!r}")
     await event(c, project_id, "triaged", decision=decision, message_id=message["message_id"])
@@ -771,6 +790,8 @@ async def _triage_result(c, run, result) -> None:
 
 async def _route(c, source: str, message: dict[str, Any], route: dict[str, Any]):
     """Hand a request to another project's Supervisor; returns the outbound handoff note to link to."""
+    if message["body"].get("images"):
+        raise InvalidResult("image requests must be resent in the destination channel")
     target = str(route.get("project_id") or "").strip()
     handoff = str(route.get("handoff") or "").strip()
     known = await one(c, "SELECT 1 FROM core.projects WHERE project_id=%s AND status='active'", (target,))

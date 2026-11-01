@@ -136,6 +136,11 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
     prompt = render_prompt(f"# Project {run['project_id']} · PM turn ({STAGE_NAMES.get(matched, matched)})",
                            context, documents, render_turn(task, run_input, inputs), output, seen, previous,
                            state=state_text, state_file=state_file)
+    from assistant_kernel.core.images import select_images
+    images, image_note, image_seen = select_images(await kernel.image_inputs(run), previous)
+    prompt += image_note
+    seen.update({key: value for key, value in (previous or {}).items() if key.startswith("image:")})
+    seen.update(image_seen)
     # Outside build the PM only reads: project files change solely through candidates → validate → publish.
     # Code delivery: the PM edits its own worktree instead of writing candidates; Kernel commits at turn end.
     candidates = build and not code
@@ -143,7 +148,7 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
     parsed, model_result = await call_for_json(
         ctx, run, config, prompt, task_id=task_id, stage=stage, session_id=session_id,
         tools=tools, sandbox="danger-full-access" if build else "read-only", candidates=candidates,
-        subagents=MAX_SUBAGENTS if matched in SUBAGENT_STAGES else 0, cwd=workspace)
+        subagents=MAX_SUBAGENTS if matched in SUBAGENT_STAGES else 0, cwd=workspace, images=images)
     misfit = outcome_misfit(parsed, stage)
     if misfit and model_result.physical_session_id:   # tell the PM once, in the same session, instead of failing blind
         parsed, model_result = await call_for_json(

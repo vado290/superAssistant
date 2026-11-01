@@ -227,9 +227,11 @@ async def execute_supervisor(run: dict[str, Any], ctx) -> dict[str, Any]:
             sections.append(SHARED_CANDIDATES_HEADING + candidates)
     if "routing" in caps and purpose == "consult":
         sections.append(prompt_text("routing"))
+    from assistant_kernel.core.images import select_images
+    images, image_note, _ = select_images(await kernel.image_inputs(run))
     parsed, model_result = await call_for_json(
-        ctx, run, config, "\n\n".join(sections), task_id=str(task_id) if task_id else None, stage=None,
-        session_id=None, tools=READ_ONLY_TOOLS, sandbox="read-only")
+        ctx, run, config, "\n\n".join(sections) + image_note, task_id=str(task_id) if task_id else None, stage=None,
+        session_id=None, tools=READ_ONLY_TOOLS, sandbox="read-only", images=images)
     if parsed is None:
         return {"decision": "invalid_output", "raw": model_result.final_text[:2000]}
     update = parsed.get("propose_shared_update")
@@ -246,4 +248,5 @@ async def execute_supervisor(run: dict[str, Any], ctx) -> dict[str, Any]:
             checked["_grant_error"] = str(exc)
     # Kernel facts go last so a model reply can never set them.
     return {**parsed, "config_sha256": config.config_sha256, "skills": list(config.skill_labels),
-            "usage": model_result.usage.model_dump(), "_capabilities": sorted(caps), **checked}
+            "usage": model_result.usage.model_dump(), "_capabilities": sorted(caps),
+            "_input_images": list(images), **checked}
