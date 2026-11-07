@@ -98,7 +98,21 @@ class DiscordTransport:
 
     async def edit(self, channel_id, message_id, text, buttons=()) -> None:
         channel = await self._channel(channel_id)
-        await channel.get_partial_message(int(message_id)).edit(content=text, view=self._view(buttons))
+        try:
+            message = await channel.fetch_message(int(message_id))
+        except discord.NotFound:
+            return  # A deleted message has nothing left to retire.
+        # Preserve the original content and files; retirement only adds a factual status.
+        from assistant_kernel.core.gateway.render import _fit
+        content = message.content
+        if not content.endswith(text):
+            content += "\n\n" + text
+        content, full = _fit(content)
+        attachments = list(message.attachments)
+        if full:
+            attachments.append(discord.File(io.BytesIO(full.encode("utf-8")), filename="card-history.md"))
+        await message.edit(content=content, attachments=attachments, view=self._view(buttons),
+                           allowed_mentions=discord.AllowedMentions.none())
 
     def link(self, channel_id, message_id=None) -> str:
         base = f"https://discord.com/channels/{self.guild_id}/{channel_id}"

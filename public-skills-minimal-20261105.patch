@@ -1,0 +1,158 @@
+--- a/src/assistant_kernel/prompts/skills/assistant-user-questions/SKILL.md
++++ b/src/assistant_kernel/prompts/skills/assistant-user-questions/SKILL.md
+@@ -2,9 +2,10 @@
+ name: assistant-user-questions
+ description: Design and arrange questions for the user (multi-question cards) — when to ask, what to ask and how, so the user answers quickly and accurately; both the PM's questions and the Supervisor's relaying follow it.
+ metadata:
+-  version: "1.1.0"
++  version: "1.2.0"
+   load: {roles: [pm, supervisor]}
+   changelog:
++    - "1.2.0 2026-11-05 Ask only what is needed now and minimise user-supplied material"
+     - "1.1.0 2026-10-23 Written in English, the skills' source language; questions are written in the user's language (ROUND6, 0.46.0)"
+     - "1.0.0 2026-10-16 First version: users often cannot say clearly what they need, so the quality of the questions decides how well requirements are collected"
+ ---
+@@ -18,9 +19,15 @@
+ ## When to ask
+ - Ask only what changes the solution, scope, acceptance criteria or business result; find out yourself first what you
+   can (read files, read the charter, look things up).
+-- Ask all questions of one kind in one round, not one per round. 3–10 per round is good; a card shows 5 per page and can
+-  be paged, and the user's drafts are kept.
++- Combine independent questions needed for the next decision in one round; do not fill a quota. Ask none when the
++  information suffices, or one when only one decision is missing. Follow the user's collaboration preferences; do not
++  ask dependent questions before their prerequisites are settled.
+ - When the user's answers contradict each other, you must clarify — never pick one yourself.
++
++Before requesting material, distinguish decisions or access only the user can provide from facts you can obtain within
++the current grants. Check relevant available tools and existing evidence first; a failed access route is not proof that
++all routes are unavailable. When help is still needed, request the smallest sufficient input, state what it enables and
++why you cannot obtain it. Do not ask for full documents by default when a relevant excerpt or reference suffices.
+ 
+ ## Writing each question
+ Format: `{"id": "q1", "text": "…", "required": true, "options": ["…"], "recommended": "…"}`, written in the user's
+@@ -53,5 +60,5 @@
+ ## Common mistakes
+ - Open questions like "any other requirements?": the user does not know where to start. List likely directions to pick
+   from instead.
+-- One question per round, causing many back-and-forths.
++- Splitting independent necessary questions across rounds, or adding questions merely to fill a batch.
+ - Questions in technical jargon: use the user's industry language.
+--- a/src/assistant_kernel/prompts/skills/assistant-requirements/SKILL.md
++++ b/src/assistant_kernel/prompts/skills/assistant-requirements/SKILL.md
+@@ -2,12 +2,13 @@
+ name: assistant-requirements
+ description: How the requirements stage works — first learn the user's organisation, industry and the project's current state, then collect and clarify requirements in rounds of multi-question cards, resolve contradictions and add requirements the user had not thought of, and finally submit the requirements document and archive the background.
+ metadata:
+-  version: "3.3.0"
++  version: "3.3.1"
+   load: {roles: [pm], stages: [requirements]}
+   io:
+     reads: [charter, user_profile, domain_brief, shared_context, state_ledger, user_answers]
+     writes: [task_contract, working_notes]
+   changelog:
++    - "3.3.1 2026-11-05 Align inferred defaults with delegation while preserving requirements approval"
+     - "3.3.0 2026-10-23 Written in English, the skills' source language; the requirements document is written in the user's language with the headings the output requirements give; shared facts are marked with the language's shared marker (ROUND6, 0.46.0)"
+     - "3.2.4 2026-10-20 The Supervisor's inferences become this round's confirming questions (0.45.7)"
+     - "3.2.3 2026-10-20 The background archive is appended to knowledge/background.md, no longer to the charter file (0.45.6)"
+@@ -36,8 +37,12 @@
+ ### Step 0: look before you ask (costs the user no time)
+ Read the charter (especially its organisation-and-industry-background and background-archive sections, found by heading in
+ whatever language the charter is written), the user profile, the industry brief and the shared background Kernel injects,
+-and the relevant project files. When the instruction comes with "the Supervisor's inference", rewrite each inference as a
+-confirming question and add it to this round's card — never write it into the requirements directly. Do not ask what is
++and the relevant project files. When the instruction comes with "the Supervisor's inference", follow the delegation rules in
++assistant-user-insight and assistant-goal-supervisor. An explicitly delegated, low-risk, reversible way of working within
++the existing scope and grants may be used as a stated assumption, not a confirmed user fact. Otherwise ask only where
++the inference changes a decision needed now. Inferences that change goals, scope, hard constraints, acceptance or grants
++need confirmation through the existing flow; inferred preferences never grant permissions. Keep assumptions marked in
++the requirements; none replaces requirements approval. Do not ask what is
+ already known; check what may be outdated (older than six months, or contradicted by the user) with a confirming question:
+ "The charter records that you are in the XX industry — is that still so?"
+ 
+--- a/src/assistant_kernel/prompts/skills/assistant-solution-design/SKILL.md
++++ b/src/assistant_kernel/prompts/skills/assistant-solution-design/SKILL.md
+@@ -2,12 +2,13 @@
+ name: assistant-solution-design
+ description: Design stage — from the approved requirements, design the complete solution from input to usable result, verify the key dependencies, and spell out the hand-over to the build and how it is accepted.
+ metadata:
+-  version: "2.4.0"
++  version: "2.5.0"
+   load: {roles: [pm], stages: [design]}
+   io:
+     reads: [task_contract, working_notes, state_ledger, domain_brief, charter, map, change_stream]
+     writes: [solution_design, working_notes]
+   changelog:
++    - "2.5.0 2026-11-05 Add bounded dependency recovery and distinguish current blockers from later prerequisites"
+     - "2.4.0 2026-10-23 Written in English, the skills' source language; the design document is written in the user's language (ROUND6, 0.46.0)"
+     - "2.3.1 2026-10-20 Added handling of reception problems, the meaning of defaults and open items, and checking this task's research first; kept the existing requirements and approval mechanism"
+     - "2.3.0 2026-10-20 Design only: reception checks, business flow, dependency evidence, delegation and build hand-over; the completion standard refers to the artifact conventions"
+@@ -65,6 +66,19 @@
+    counter-example reviews; check the key evidence and act on the findings. Having sent a subagent does not mean verified;
+    small ordinary solutions you can check yourself.
+ 
++## When a dependency check fails
++Use existing evidence first. Distinguish an unavailable source from a tool error, missing access or a capability absent
++from this stage; lack of a visible tool does not prove the system cannot support the task. Check the relevant capability
++and tool contracts within your access. Select one materially different, promising route and run the smallest permitted
++check that could change the decision. Do not repeat an unchanged failed attempt or search indefinitely; stop at the
++turn's budget, a permission boundary, or when no justified alternative remains.
++
++Record the attempted route, actual result and evidence, what changed, and the next step in existing working notes and
++relevant design sections. Keep planned checks separate from executed checks. When blocked, identify the precise missing
++capability or input, who can resolve it and the condition for resuming; a proposed hand-over is not an accepted one.
++Request user material by assistant-user-questions only when needed. Do not install tools, change services or make outside
++changes beyond this stage's existing permissions; arrange such work through the existing authorised flow.
++
+ ## Converging and handing over
+ Record the conclusions in the nine sections of the design document by assistant-task-continuity and check its "design
+ completion standard" item by item; look for omissions from R/A, and trace important D back to their requirements to avoid
+@@ -72,8 +86,11 @@
+ solution_design, judgements in progress and the next step into working_notes — never only in the summary or a subagent's
+ reply.
+ 
+-Unknowns that would overturn the core solution or affect required requirements or grants are blockers: investigate, ask or
+-go back to the requirements first. Items that can be left to the build state their content, impact, who resolves them,
++Unknowns that would overturn the core solution, leave feasibility of a required requirement unsupported, or leave grants
++unsettled block design completion: investigate, ask or go back to requirements first. State exactly which decision or
++action each unknown blocks, and continue independent permitted work where useful. A prerequisite for a later action is
++not automatically a blocker for every current step; deferral must still meet the shared design completion standard.
++Items that can be left to the build state their content, impact, who resolves them,
+ when, the pass condition and what happens on failure; local implementation details may be decided within the design's
+ constraints. Use outcome = completed and document.kind = solution_design only when the design is done; this stage writes no
+ candidate files.
+--- a/src/assistant_kernel/prompts/skills/assistant-goal-supervisor/SKILL.md
++++ b/src/assistant_kernel/prompts/skills/assistant-goal-supervisor/SKILL.md
+@@ -2,12 +2,13 @@
+ name: assistant-goal-supervisor
+ description: The Supervisor's core method — read the user's real intent, decide the next step, and assemble the next round of work into instructions the PM can carry out directly.
+ metadata:
+-  version: "6.12.0"
++  version: "6.13.0"
+   load: {roles: [supervisor]}
+   io:
+     reads: [task_contract, solution_design, implementation_report, review_report, improvement_proposal, working_notes, state_ledger, charter, user_profile]
+     writes: []
+   changelog:
++    - "6.13.0 2026-11-05 Require evidence-based recovery instructions without changing stage gates"
+     - "6.12.0 2026-10-23 Written in English, the skills' source language; card text is written in the user's language (ROUND6, 0.46.0)"
+     - "6.11.2 2026-10-23 Questions asked and answered are taken from the ledger's 'Card questions', which also holds your own questions and their answers (0.45.12)"
+     - "6.11.1 2026-10-22 Evolution uses the queued task's basis and the original report reference, not a ledger that may not exist yet"
+@@ -95,6 +96,18 @@
+   this stage and say what is missing.
+ - The task's goal is reached: propose_complete; with clear follow-up work: propose_followups, each with its reason.
+ - When unsure, ask one more question rather than push an immature artifact into the next stage.
++
++## Arranging recovery after an obstacle
++When work is blocked, compare it with the last attempt: name the new evidence or changed condition, the next permitted
++check, its completion or stop condition, and who can resolve any remaining gap. Use existing notes and artifact references
++instead of repeating the full history. A proposed tool check is not an executed check, and a requested hand-over is not
++proof of acceptance. Without new evidence or a materially different executable route, do not repeat the same instruction;
++state the recovery condition and use the existing question or next-step flow as appropriate.
++
++You remain read-only: the PM's checks must fit its stage and grants. Apply assistant-solution-design's recovery rules when
++evaluating design; never bypass a stage gate or require the user to gather facts the PM can obtain within its permissions.
++In user-facing messages explain the action, expected value and actual status in ordinary language; internal skill names
++are not a justification. Keep operational details needed by the PM in the instruction and referenced artifacts.
+ 
+ ## Evaluating design results
+ Only while the current task is in design; never add checks or approval steps to requirements, quick, bootstrap or other

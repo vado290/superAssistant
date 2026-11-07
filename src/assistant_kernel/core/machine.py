@@ -874,6 +874,18 @@ async def on_action(c, project_id: str, item_id: str, action: str, values: dict[
                 # questions with their answers, in the question's own words (state ledger, system map O1)
                 qa=[{"id": q.get("id"), "text": q.get("text"), "answer": (values.get("answers") or {}).get(q.get("id"))}
                     for q in item["content"].get("questions") or [] if isinstance(q, dict)])
+    if action in ("submit", "revise"):
+        lines = [t("card.history_receipt", item=item_id, status=t("done." + action))]
+        if action == "submit":
+            answers = values.get("answers") or {}
+            for question in item["content"].get("questions") or []:
+                answer = answers.get(question["id"])
+                if answer is not None:
+                    shown = t("card.history_credential") if question.get("credential") else str(answer)
+                    lines.append(f"{question['text']}\n{shown}")
+        elif values.get("text"):
+            lines.append(values["text"])
+        await notify(c, project_id, "supervisor", "\n\n".join(lines))
     if item["target"]["kind"] == "consultation":
         return await _consultation_action(c, project_id, item, action, source_message_id)
     task = await load_task(c, item["target"]["id"])
@@ -936,9 +948,25 @@ async def _next_step_action(c, task, item, action, values, source_message_id):
     if error:
         raise cards.StaleItem(error)
     task = await _update(c, task, approvals=approvals, track=track)
-    return await to_pm(c, task, {"kind": "instruction", "instruction": content["instruction"],
-                                 "inferred_intent": content.get("inferred_intent") or [],
-                                 "note": values.get("text", "")}, stage=content["target_stage"])
+    result = await to_pm(c, task, {"kind": "instruction", "instruction": content["instruction"],
+                                   "inferred_intent": content.get("inferred_intent") or [],
+                                   "note": values.get("text", "")}, stage=content["target_stage"])
+    text = t("card.history_instruction", task=task["task_id"], stage=i18n.stage_name(content["target_stage"]),
+             item=item["item_id"], instruction=content["instruction"])
+    if content.get("inferred_intent"):
+        text += "\n\n" + t("card.inferred") + "\n" + "\n".join(
+            f"- {inference['text']}" + (t("card.basis", basis=inference["basis"]) if inference.get("basis") else "")
+            for inference in content["inferred_intent"])
+    if values.get("text"):
+        text += "\n\n" + values["text"]
+    displayed = await one(c, """SELECT display->'messages'->%s AS reference FROM core.interactions
+        WHERE project_id=%s AND display->'messages' ? %s ORDER BY created_at DESC LIMIT 1""",
+        (item["item_id"], task["project_id"], item["item_id"]))
+    reference = (displayed or {}).get("reference")
+    await notify(c, task["project_id"], "pm", text, task_id=task["task_id"],
+                 **({"card_reference": {key: reference[key] for key in ("channel_id", "message_id")}}
+                    if reference else {}))
+    return result
 
 
 async def _decision_action(c, task, item, action, values, source_message_id, *, settings=None):

@@ -57,8 +57,15 @@ def test_early_turns_shrink_to_one_line():
               "result": {"outcome": "completed", "summary": f"小结{n}"}} for n in range(12)]
     task = {"goal": "日报", "stage": "requirements", "track": "full", "approvals": {}, "documents": {}}
     text = render_state(task, {"turns": turns, "actions": []}, STAGE_NAMES)
-    assert "Turn 1 (requirements, 10-16 09:00): 小结0" in text and "指令0" not in text
+    assert "Turn 1 (requirements, 10-16 17:00 Asia/Shanghai): 小结0" in text and "指令0" not in text
     assert "指令11" in text and "PM turns completed: 12" in text
+
+
+def test_history_times_use_the_configured_zone_across_midnight():
+    from assistant_kernel.core.runtime import local_time
+    late = datetime(2026, 10, 16, 17, 30, tzinfo=timezone.utc)
+    assert local_time(late) == "10-17 01:30 Asia/Shanghai"
+    assert local_time(late.replace(tzinfo=None), "%m-%d") == "10-17 Asia/Shanghai"
 
 
 async def test_an_outcome_of_another_stage_is_corrected_in_the_same_session(kernel, sim, dispatcher,  # noqa: F811

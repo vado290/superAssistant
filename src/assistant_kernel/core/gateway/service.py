@@ -179,9 +179,10 @@ class GatewayService:
         for item_id, shown in list(display["messages"].items()):
             if item_id not in current:
                 try:
-                    await self.transport.edit(shown["channel_id"], shown["message_id"], render.closed_text(shown["item"]))
-                except Exception:   # e.g. the user deleted the message: nothing left to retire
-                    log.warning("could not retire card message %s; dropped", shown["message_id"], exc_info=True)
+                    await self.transport.edit(shown["channel_id"], shown["message_id"], await self.kernel.card_item_status(pid=card["project_id"], item_id=item_id))
+                except Exception:
+                    log.warning("could not retire card message %s; will retry", shown["message_id"], exc_info=True)
+                    continue
                 del display["messages"][item_id]
                 changed = True
         for item_id, item in current.items():
@@ -216,10 +217,14 @@ class GatewayService:
                           else channels.supervisor_channel_id if message["role"] == "supervisor"
                           else channels.pm_channel_id)
             text = message["body"].get("text", "")
+            reference = message["body"].get("card_reference")
+            if reference:
+                text += "\n" + self.transport.link(reference["channel_id"], reference["message_id"])
             if message["body"].get("link_message"):
                 text += f"\n👉 {await self._link_to(message['body']['link_message'])}"
             try:
-                external = await self.transport.send(channel_id, text)
+                text, attachment = render._fit(text)
+                external = await self.transport.send(channel_id, text, attachment=attachment)
             except Exception:
                 log.exception("delivery of message %s failed; %s", message["message_id"],
                               "marked failed" if expired else "will retry")

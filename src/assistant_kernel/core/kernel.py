@@ -227,6 +227,18 @@ class Kernel:
                    AND (status='open' OR display->'messages' <> '{}'::jsonb) ORDER BY created_at""",
                 (project_id,))).fetchall())
 
+    async def card_item_status(self, *, pid: str, item_id: str) -> str:
+        """Resolve a retired card from facts, without guessing why an old card disappeared."""
+        from assistant_kernel.core.i18n import t
+        async with self.db.tx() as c:
+            action = await one(c, """SELECT payload FROM core.task_events WHERE project_id=%s
+                AND kind='card_action' AND payload->>'item_id'=%s ORDER BY created_at DESC LIMIT 1""", (pid, item_id))
+            if action:
+                return t("card.history_status", status=t("done." + action["payload"]["action"]))
+            replacement = await one(c, """SELECT 1 FROM core.task_events WHERE project_id=%s
+                AND kind='card_item_shown' AND payload->>'replaces'=%s LIMIT 1""", (pid, item_id))
+            return t("card.history_replaced" if replacement else "card.history_closed")
+
     async def set_card_display(self, interaction_id, display: dict[str, Any]) -> None:
         async with self.db.tx() as c:
             await cards.set_display(c, interaction_id, display)

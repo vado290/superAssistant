@@ -10,11 +10,13 @@ from fastapi import FastAPI, Response
 
 from assistant_kernel import __schema_version__, __version__
 from assistant_kernel.api.dashboard import build_router
+from assistant_kernel.api.host import build_router as build_host_router
 from assistant_kernel.config import KernelSettings
 
 settings = KernelSettings.from_environment()
 app = FastAPI(title="Assistant Kernel", version=__version__)
 app.include_router(build_router(settings))
+app.include_router(build_host_router(settings))
 
 
 @app.get("/health/live")

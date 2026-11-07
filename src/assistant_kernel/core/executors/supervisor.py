@@ -8,7 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from assistant_kernel.core import grants, iterlog, rules
-from assistant_kernel.core.runtime import DEFAULT_TZ
+from assistant_kernel.core.runtime import DEFAULT_TZ, local_time
 from assistant_kernel.core import skills as skill_rules
 from assistant_kernel.core.executors.common import (
     DOMAIN_BRIEF, PROFILE_HEADING, READ_ONLY_TOOLS, USER_PROFILE, call_for_json, capabilities, charter, knowledge_text, load_agent,
@@ -81,7 +81,7 @@ def render_reason(run_input: dict[str, Any]) -> str:
 def render_messages(messages: list[dict[str, Any]]) -> str:
     who = {("inbound", "pm"): "user → PM channel", ("inbound", "supervisor"): "user → Supervisor channel",
            ("outbound", "pm"): "PM", ("outbound", "supervisor"): "Supervisor", ("outbound", "kernel"): "system"}
-    lines = [f"- [{m['created_at']:%m-%d %H:%M}] {who.get((m['direction'], m['role']), m['role'])}: {m['body'].get('text')}"
+    lines = [f"- [{local_time(m['created_at'])}] {who.get((m['direction'], m['role']), m['role'])}: {m['body'].get('text')}"
              for m in messages if m["body"].get("text")]
     return "\n".join(lines) or "(none)"
 
@@ -119,7 +119,7 @@ async def project_situation(kernel, settings, project_id: str, task: dict[str, A
                  "### Other tasks (queued and recently ended; read a task's ledger in the read-only sandbox for details)")
     lines += [f"- [{TASK_STATES.get(t['state'], t['state'])}] {t['goal']} ({t['kind']}"
               + (f", closed because {t['close_reason']}" if t.get("close_reason") else "")
-              + f", {t['updated_at']:%m-%d}) · "
+              + f", {local_time(t['updated_at'], '%m-%d')}) · "
               + (f"task {t['task_id']} (queued; does not rely on state.md)" if evolution and t["state"] == "queued" else
                  f"`runs/{t['task_id']}/state.md`")
               + ("\n  basis: " + json.dumps({"reason": t.get("reason"), "parent_task_id": t.get("parent_task_id"),

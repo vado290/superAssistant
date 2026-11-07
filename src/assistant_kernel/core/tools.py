@@ -280,6 +280,29 @@ def build_server(scope: Scope) -> MCPServer:
                                 "outcome": r["outcome"], "source_ref": r["source_ref"]} for r in rows]}
 
     @tool(READ_ONLY)
+    async def host_capabilities() -> dict:
+        """Devices and read-only actions this project may use on a registered PC. Use before host_submit."""
+        from assistant_kernel.core import host_operations
+        return await host_operations.capabilities(settings, project_id)
+
+    @tool(SCOPED_WRITE)
+    async def host_submit(device_id: str, action: str, request_key: str,
+                          arguments: dict | None = None, capability_revision: str | None = None) -> dict:
+        """Queue one authorized PC action (e.g. obs.status), validated against its capability schema. Returns operation_id and queued, which is not success; poll
+        host_status. Reuse the same request_key when retrying the same request."""
+        from assistant_kernel.core import host_operations
+        return await host_operations.submit(settings, project_id=project_id, run_id=scope.run_id,
+                                            claim_token=scope.claim_token, owner_key=scope.task_id, device_id=device_id,
+                                            action=action, arguments=arguments, request_key=request_key,
+                                            capability_revision=capability_revision)
+
+    @tool(READ_ONLY)
+    async def host_status(operation_id: str) -> dict:
+        """State and result of a PC operation of this project (queued, running, succeeded, failed, expired)."""
+        from assistant_kernel.core import host_operations
+        return await host_operations.status(settings, project_id=project_id, operation_id=operation_id)
+
+    @tool(READ_ONLY)
     async def list_skill_updates(update_id: str | None = None, limit: int = 20) -> dict:
         """Read this project's skill adoption evidence; this never authorizes, applies or rolls back a batch."""
         from assistant_kernel.core.kernel import Kernel

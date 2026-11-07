@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from assistant_kernel.core import rules
+from assistant_kernel.core.runtime import local_time
 from assistant_kernel.storage import ProjectRuntimeManager
 
 FULL_TURNS = 10           # the latest turns in full; earlier ones as one line each
@@ -53,7 +54,7 @@ def render_state(task: dict[str, Any], ledger: dict[str, Any], stage_names: dict
     for number, turn in enumerate(turns, 1):
         given, result = turn["input"] or {}, turn["result"] or {}
         stage = stage_names.get(given.get("stage"), given.get("stage"))
-        head = f"- Turn {number} ({stage}, {turn['created_at']:%m-%d %H:%M})"
+        head = f"- Turn {number} ({stage}, {local_time(turn['created_at'])})"
         if number <= early:
             lines.append(f"{head}: {_cut(result.get('summary'), 150)}")
             continue
@@ -91,7 +92,7 @@ def render_state(task: dict[str, Any], ledger: dict[str, Any], stage_names: dict
         lines.append("\n### Card actions (latest)")
         for a in others:
             text = f"; the user wrote: {_cut(a['text'], 300)}" if a.get("text") else ""
-            lines.append(f"- {a['at']:%m-%d %H:%M} {ACTION_NAMES.get(a.get('action'), a.get('action'))}"
+            lines.append(f"- {local_time(a['at'])} {ACTION_NAMES.get(a.get('action'), a.get('action'))}"
                          f" \"{_cut(a.get('message'), 120)}\"{text}")
     return "\n".join(lines)
 
@@ -129,7 +130,7 @@ def render_questions(task: dict[str, Any], cards: list[dict[str, Any]], actions:
         else:
             status = "not answered"
         questions = [q for q in content.get("questions") or [] if isinstance(q, dict)]
-        head = f"- {card['at']:%m-%d %H:%M} {who} ({status})"
+        head = f"- {local_time(card['at'])} {who} ({status})"
         if number <= early:
             lines.append(f"{head}: {_cut('; '.join(str(q.get('text')) for q in questions), 150)}")
             continue

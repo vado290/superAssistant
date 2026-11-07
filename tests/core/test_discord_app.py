@@ -22,3 +22,16 @@ async def test_buttons_and_modals_build_offline(kernel):
     assert modal.inputs["q1"].default == "团队"
     assert DiscordTransport(client, "1").link("2", "9") == "https://discord.com/channels/1/2/9"
     await client.close()
+
+
+async def test_retirement_preserves_original_content_and_files():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    attachment = object()
+    message = SimpleNamespace(content="Original question and options", attachments=[attachment], edit=AsyncMock())
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+    transport = DiscordTransport(SimpleNamespace(get_channel=lambda _: channel), "1")
+    await transport.edit("2", "3", "Status: answered")
+    sent = message.edit.call_args.kwargs
+    assert sent["content"] == "Original question and options\n\nStatus: answered"
+    assert sent["attachments"] == [attachment] and sent["view"] is None

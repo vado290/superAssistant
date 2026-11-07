@@ -27,7 +27,7 @@ MVP_TOOLS = frozenset({
     "vault_list", "vault_read_text",
     "volcengine_model_status", "volcengine_generate", "volcengine_ocr",
     "read_task_document", "edit_task_document", "list_iterations", "map_lookup", "list_credentials",
-    "get_credential", "list_skill_updates",
+    "get_credential", "list_skill_updates", "host_capabilities", "host_submit", "host_status",
 })
 CANDIDATE_TOOLS = frozenset({"write_candidate_file", "delete_candidate_file"})
 # Kernel's own document protocol for PM turns: granted whenever offered, a project's tool list does not narrow it.
@@ -36,7 +36,8 @@ DOCUMENT_TOOLS = frozenset({"read_task_document", "edit_task_document"})
 # the initialising tool (every other tool needs it called first), recent conversation, the change stream (ROUND4),
 # the map and the credentials (ROUND5). An empty tool list (Supervisor) therefore means "platform tools only".
 PLATFORM_TOOLS = DOCUMENT_TOOLS | {"get_authorized_workspace", "list_recent_history", "list_iterations", "map_lookup",
-                                   "list_credentials", "get_credential", "list_skill_updates"}
+                                   "list_credentials", "get_credential", "list_skill_updates",
+                                   "host_capabilities", "host_submit", "host_status"}
 READ_ONLY_TOOLS = MVP_TOOLS - CANDIDATE_TOOLS - DOCUMENT_TOOLS - {"volcengine_generate", "volcengine_ocr"}
 
 

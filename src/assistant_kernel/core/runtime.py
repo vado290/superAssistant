@@ -29,6 +29,15 @@ MAX_TIMEOUT = 6 * 3600
 PROGRAM_PREFIX = "proj-"
 
 
+def local_time(value: Any, fmt: str = "%m-%d %H:%M", zone: str = DEFAULT_TZ) -> str:
+    """Display a stored UTC timestamp in the configured zone, marked with its UTC offset (display only)."""
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return f"{value.astimezone(ZoneInfo(zone)).strftime(fmt)} {zone}"
+
+
 class ManifestError(ValueError):
     pass
 

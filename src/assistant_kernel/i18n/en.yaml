@@ -94,7 +94,7 @@ decision.project_task: Start creating a project
 decision.grant: Directory access
 decision.followups: Proposed follow-up tasks
 decision.shared_update: Change the shared background
-done.execute: Confirmed — the PM starts now.
+done.execute: Confirmed — the PM turn is queued.
 done.approve: Approved.
 done.reject: 'Noted: declined.'
 done.stop: Task stopped.
@@ -360,3 +360,16 @@ pm.review_workspace: The review workspace is missing or differs from the validat
 kernel.evolution_goal: 'Weekly review: propose improvements from the recent run records'
 kernel.expired: '⌛ The task waited for you more than {days} days without a reply and ended on its own: {goal}. All its documents are kept; bring it up again whenever you need it.'
 kernel.revoked_command: revoked by the user with /grants revoke
+
+card.history_status: '**Status:** {status}'
+card.history_replaced: '**Status:** Replaced by a newer card.'
+card.history_closed: '**Status:** Closed; no longer actionable. Detailed outcome is unavailable here.'
+card.history_receipt: '**Recorded response — card {item}**
+
+{status}'
+card.history_credential: '[Credential provided; value omitted]'
+card.history_instruction: '**Confirmed PM instruction — queued**
+
+Task: {task} · Stage: {stage} · Card: {item}
+
+{instruction}'

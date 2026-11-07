@@ -312,3 +312,47 @@ entries:
   kind: module
   purpose: 'Project credentials (docs/ROUND5_PLAN.md D8, §5.5): one JSON file per
     project, `runtime/credentials.json`.'
+- path: src/assistant_kernel/core/host_operations.py
+  kind: module
+  purpose: Read-only PC host operations - device auth, project action policy, queue, claim and result record
+- path: src/assistant_kernel/api/host.py
+  kind: module
+  purpose: Device-facing API for a PC executor to long-poll operations and report results
+- path: src/assistant_kernel/host_client/__init__.py
+  kind: module
+  purpose: PC executor package
+- path: src/assistant_kernel/host_client/runner.py
+  kind: module
+  purpose: PC executor loop - claim read-only operations from Kernel, run adapters, report results
+- path: src/assistant_kernel/host_client/adapters/__init__.py
+  kind: module
+  purpose: PC executor adapters package
+- path: src/assistant_kernel/host_client/adapters/obs.py
+  kind: module
+  purpose: OBS websocket v5 adapter with read-only status and scene queries
+- path: tests/core/test_host_operations.py
+  kind: test
+  purpose: Host operation policy, idempotent submit, claim lease checks and result recording
+
+- path: src/assistant_kernel/core/sql/0010_host_arguments.sql
+  kind: migration
+  purpose: Versioned host arguments and trusted caller identity; preserves OBS query compatibility
+
+- path: src/assistant_kernel/host_client/adapters/mcp.py
+  kind: module
+  purpose: Explicit stdio MCP query connector with local allowlist and bounded text results
+- path: tests/test_host_mcp.py
+  kind: test
+  purpose: Real stdio MCP discovery, query validation and errors
+
+- path: src/assistant_kernel/host_client/adapters/sessions.py
+  kind: module
+  purpose: Project-task scoped persistent MCP queries with bounded sessions and owned process cleanup
+
+- path: src/assistant_kernel/host_client/journal.py
+  kind: module
+  purpose: Durable local operation identity and result journal preventing blind replay
+
+- path: src/assistant_kernel/host_client/artifacts.py
+  kind: module
+  purpose: Scoped local artifact staging and integrity verification; no upload or arbitrary file import

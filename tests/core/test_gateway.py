@@ -29,7 +29,7 @@ class FakeTransport:
         return message_id
 
     async def edit(self, channel_id, message_id, text, buttons=()):
-        self.messages[message_id].update(text=text, buttons=list(buttons))
+        self.messages[message_id].update(text=self.messages[message_id]["text"] + "\n\n" + text, buttons=list(buttons))
 
     def link(self, channel_id, message_id=None):
         return f"https://discord/{channel_id}/{message_id}" if message_id else f"https://discord/{channel_id}"
@@ -68,9 +68,13 @@ async def test_next_step_card_round_trip(gateway, sim):
     assert "梳理日报需求" in card["text"] and [b["label"] for b in card["buttons"]] == ["Go", "Change…", "Stop task"]
     assert gateway.transport.in_channel(PM_CH)[-1]["text"].startswith("📌")
     reply = await click(gateway, "Go")
-    assert reply.text == "Confirmed — the PM starts now."
+    assert reply.text == "Confirmed — the PM turn is queued."
     assert (await sim.task(received["task_id"]))["state"] == "pm"
-    assert "handled or replaced" in gateway.transport.messages["1"]["text"] and not gateway.transport.messages["1"]["buttons"]
+    assert "梳理日报需求" in gateway.transport.messages["1"]["text"]
+    assert "queued" in gateway.transport.messages["1"]["text"] and not gateway.transport.messages["1"]["buttons"]
+    await gateway.deliver_outbox()
+    assert "梳理日报需求" in gateway.transport.in_channel(PM_CH)[-1]["text"]
+    assert await gateway.deliver_outbox() == 0
 
 
 async def test_questions_are_answered_in_a_prefilled_modal(gateway, sim, kernel):
@@ -127,6 +131,9 @@ async def test_many_questions_use_pages_and_drafts(gateway, sim, kernel):
     assert reply.text == "Answers submitted."
     run = await kernel.claim("w1")
     assert run["input"]["answers"] == {f"s{i}": f"答{i}" for i in range(7)}
+    await gateway.deliver_outbox()
+    receipt = gateway.transport.in_channel(SUP_CH)[-1]["text"]
+    assert all(f"答{i}" in receipt for i in range(7))
 
 
 async def test_stale_click_and_revise(gateway, sim):
@@ -139,7 +146,7 @@ async def test_stale_click_and_revise(gateway, sim):
     sim.script("supervisor:review_input", {"decision": "upgrade", "item": next_step("requirements", "周报")})
     await sim.drain()
     await gateway.sync_cards()
-    assert "handled or replaced" in old["text"]
+    assert "Replaced by a newer card" in old["text"] and "日报" in old["text"]
     reply = await gateway.on_button(channel_id=SUP_CH, user_id=USER, interaction_id="i9",
                                     custom_id=old["buttons"][0]["custom_id"] if old["buttons"] else "core:x:execute")
     assert reply.text == STALE_REPLY
@@ -226,4 +233,40 @@ async def test_status_and_cancel_commands(gateway, sim):
     assert "Open cards" in await gateway.pending_text(SUP_CH)
     assert (await gateway.cancel_active(PM_CH, USER)).startswith("Task cancelled")
     card = gateway.transport.messages["1"]
-    assert "handled or replaced" in card["text"] and not card["buttons"]     # the cancelled task's card is retired
+    assert "no longer actionable" in card["text"] and not card["buttons"]     # the cancelled task's card is retired
+
+
+async def test_long_instruction_receipt_and_duplicate_action(gateway, sim):
+    instruction = "Verify the approved input. " * 180
+    await say(gateway, "Research a report")
+    sim.script("supervisor:evaluate", next_step("requirements", instruction))
+    await sim.drain()
+    await gateway.sync_cards()
+    old = gateway.transport.last_card()
+    old_attachment = old["attachment"]
+    item_id = old["buttons"][0]["custom_id"].split(":")[1]
+    await click(gateway, "Go", interaction="long-go")
+    assert old["attachment"] == old_attachment and instruction in old_attachment
+    assert await gateway.kernel.act("p1", item_id, "execute", external_event_id="click:long-go") == {"action": "duplicate"}
+    assert await gateway.deliver_outbox() == 1
+    receipt = gateway.transport.in_channel(PM_CH)[-1]
+    assert instruction in receipt["attachment"]
+    assert "https://discord/200/1" in receipt["attachment"]
+    assert len(receipt["text"]) <= 1900
+    assert await gateway.deliver_outbox() == 0
+
+
+async def test_response_history_redacts_credentials(gateway, sim):
+    await say(gateway, "Configure a service")
+    sim.script("supervisor:evaluate", {"decision": "ask_user", "message": "Access details",
+        "questions": [{"id": "key", "text": "Service key", "credential": {"key": "test_key"}},
+                      {"id": "region", "text": "Region"}]})
+    await sim.drain()
+    await gateway.sync_cards()
+    modal = (await click(gateway, "Answer")).modal
+    await gateway.on_modal(channel_id=SUP_CH, user_id=USER, interaction_id="secret-answer",
+        custom_id=modal["custom_id"], values={"key": "private-test-value", "region": "local"})
+    await gateway.deliver_outbox()
+    receipt = gateway.transport.in_channel(SUP_CH)[-1]["text"]
+    assert "private-test-value" not in receipt
+    assert "Credential provided" in receipt and "local" in receipt

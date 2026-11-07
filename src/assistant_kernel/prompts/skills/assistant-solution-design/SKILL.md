@@ -2,12 +2,13 @@
 name: assistant-solution-design
 description: Design stage — from the approved requirements, design the complete solution from input to usable result, verify the key dependencies, and spell out the hand-over to the build and how it is accepted.
 metadata:
-  version: "2.4.0"
+  version: "2.5.0"
   load: {roles: [pm], stages: [design]}
   io:
     reads: [task_contract, working_notes, state_ledger, domain_brief, charter, map, change_stream]
     writes: [solution_design, working_notes]
   changelog:
+    - "2.5.0 2026-11-05 Add bounded dependency recovery and distinguish current blockers from later prerequisites"
     - "2.4.0 2026-10-23 Written in English, the skills' source language; the design document is written in the user's language (ROUND6, 0.46.0)"
     - "2.3.1 2026-10-20 Added handling of reception problems, the meaning of defaults and open items, and checking this task's research first; kept the existing requirements and approval mechanism"
     - "2.3.0 2026-10-20 Design only: reception checks, business flow, dependency evidence, delegation and build hand-over; the completion standard refers to the artifact conventions"
@@ -65,6 +66,19 @@ that applies to this task, clear up conflicts first, and never mix them or overr
    counter-example reviews; check the key evidence and act on the findings. Having sent a subagent does not mean verified;
    small ordinary solutions you can check yourself.
 
+## When a dependency check fails
+Use existing evidence first. Distinguish an unavailable source from a tool error, missing access or a capability absent
+from this stage; lack of a visible tool does not prove the system cannot support the task. Check the relevant capability
+and tool contracts within your access. Select one materially different, promising route and run the smallest permitted
+check that could change the decision. Do not repeat an unchanged failed attempt or search indefinitely; stop at the
+turn's budget, a permission boundary, or when no justified alternative remains.
+
+Record the attempted route, actual result and evidence, what changed, and the next step in existing working notes and
+relevant design sections. Keep planned checks separate from executed checks. When blocked, identify the precise missing
+capability or input, who can resolve it and the condition for resuming; a proposed hand-over is not an accepted one.
+Request user material by assistant-user-questions only when needed. Do not install tools, change services or make outside
+changes beyond this stage's existing permissions; arrange such work through the existing authorised flow.
+
 ## Converging and handing over
 Record the conclusions in the nine sections of the design document by assistant-task-continuity and check its "design
 completion standard" item by item; look for omissions from R/A, and trace important D back to their requirements to avoid
@@ -72,8 +86,11 @@ unauthorised extensions. Mark facts, assumptions and recommendations with their 
 solution_design, judgements in progress and the next step into working_notes — never only in the summary or a subagent's
 reply.
 
-Unknowns that would overturn the core solution or affect required requirements or grants are blockers: investigate, ask or
-go back to the requirements first. Items that can be left to the build state their content, impact, who resolves them,
+Unknowns that would overturn the core solution, leave feasibility of a required requirement unsupported, or leave grants
+unsettled block design completion: investigate, ask or go back to requirements first. State exactly which decision or
+action each unknown blocks, and continue independent permitted work where useful. A prerequisite for a later action is
+not automatically a blocker for every current step; deferral must still meet the shared design completion standard.
+Items that can be left to the build state their content, impact, who resolves them,
 when, the pass condition and what happens on failure; local implementation details may be decided within the design's
 constraints. Use outcome = completed and document.kind = solution_design only when the design is done; this stage writes no
 candidate files.
