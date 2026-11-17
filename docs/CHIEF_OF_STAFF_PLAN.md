@@ -191,8 +191,20 @@ Final promotion checklist (open items are not release passes):
   Clean locked validation, existing test and existing prod pass pip check with inherited PYTHONPATH/PYTHONHOME cleared.
 - [x] Preserve historical review profiles without editing applied migrations. Production inspection found no active Kernel
   evolution task; new reviews derive the corrected database identity. Historical labels do not block this release.
-- [ ] Review/commit the final integrated source through the normal release process and record its wheel/version/hash.
-- [ ] During authorized deployment: complete read-only preflight, actual backup and configuration capture before mutation.
-- [ ] After deployment: verify services/version, then create CoS through the approved charter/bootstrap and validate real
-  Discord PM/Supervisor routing plus authorized summaries. Verify ordinary-project daily operations separately.
-No production deployment, production migration, live CoS creation or full-suite certification occurred in this change.
+- [x] Integrated source committed as 3d840a4 for 0.46.4. Final validation wheel SHA256:
+  db9f429a93a2db374400512289a99e43f17b54d5c35b9930fb44f7eb85cf3fd0.
+  Deployment wheel package contents match all 165 validated package files.
+- [x] Authorized production deployment completed: read-only preflight, 1,534,330-byte database backup and Supervisor
+  snapshot retained under release-backups/20261117-102629; migrations 0010–0015 applied; API reports 0.46.4/core6.0015.
+  API, dispatcher and gateway are running; Discord reconnected. Existing project switches and pending review preserved.
+- [ ] Live CoS bootstrap acceptance remains blocked by the configured agent runtime's usage limit (reported reset 11:36 AM).
+  Task a3f1f3c6-526c-4c8f-84d2-7f08a7ba1f23 was created through real triage; Supervisor approved charter preparation;
+  the user-authorized requirements card was executed through Kernel.act. PM drafts are retained, but the PM did not finish.
+  Do not claim the project, access policy or Discord channels exist. Resume the existing task; do not submit a duplicate.
+- [x] Existing project operation templates synchronized to 3.6.0; triage-routing to 1.3.0 and Kernel maintenance to 1.4.1.
+  Existing daily_operations switches remain false as designed; this release does not silently opt old projects in.
+  Existing pending YouTube evolution review and retired validation jobs were preserved. No active production job was
+  available for a live job-observation acceptance run; automated daily-operation scenarios passed in the full suite.
+Production 0.46.4/core6.0015 is deployed and healthy. The installed-wheel suite passed (610 passed, 4 skipped), with
+2 additional passing checks for the final maintenance-skill delta. Live CoS provisioning is pending the runtime limit.
+No new Docker image or container was created. PostgreSQL client tools were installed in the existing AI container.
