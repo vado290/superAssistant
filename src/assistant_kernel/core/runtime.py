@@ -135,6 +135,11 @@ def parse_manifest(text: str, exists: Callable[[str], bool]) -> dict[str, list[d
                     raise ManifestError(f"the entry of job {jid} must be agents/<name>")
                 if not exists(f"{job['entry']}/config.yaml") or not exists(f"{job['entry']}/role.md"):
                     raise ManifestError(f"the agent of job {jid} lacks {job['entry']}/config.yaml or role.md")
+                if raw.get("model_purpose"):
+                    from assistant_kernel.core.model_plan import PURPOSE
+                    if not PURPOSE.fullmatch(str(raw["model_purpose"])):
+                        raise ManifestError(f"invalid model_purpose for job {jid}")
+                    job["model_purpose"] = str(raw["model_purpose"])
                 job["prompt"] = str(raw.get("prompt") or "").strip()
                 if not job["prompt"]:
                     raise ManifestError(f"job {jid} (agent) needs a prompt: the task given to the agent on each run")

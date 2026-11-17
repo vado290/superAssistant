@@ -2,9 +2,10 @@
 name: assistant-agent-design
 description: Design an agent inside a product (run by an agent job in jobs.yaml) — directory layout, config.yaml, role.md and its own skills; also a reference when changing the role notes of this project's PM or Supervisor.
 metadata:
-  version: "2.2.0"
+  version: "2.3.0"
   load: {roles: [pm], stages: [design, build], on_demand: true}
   changelog:
+    - "2.3.0 2026-11-17 Align model routing and stable-prefix method with actual runtime boundaries"
     - "2.2.0 2026-10-25 The example config no longer sets a model; a product agent that needs another model names a profile (0.46.1)"
     - "2.1.0 2026-10-23 Written in English, the skills' source language; what the user reads follows the user's language (ROUND6, 0.46.0)"
     - "2.0.2 2026-10-18 Skills moved to one flat folder per agent, agents/<agent>/.agents/skills/ (ROUND5 R5.1)"
@@ -53,3 +54,9 @@ agent on a different one, add `profile: <name>` under `harness`, naming a profil
 - [ ] No step needs to write files (if one does, make it a script job)
 - [ ] The skill's load.roles includes this agent's name
 - [ ] When the result should not be in English, the job's prompt says which language to write it in
+
+## Model selection and prompt reuse
+For model-backed steps, record the owning agent/script, capability, purpose, profile and actual call entry point.
+Use assistant-model-routing and the current catalog. Keep reusable rules and output contracts before dynamic job input;
+do not repeat unchanged skills in every job prompt. Resume sessions with changes only. Cache hashes are layout evidence,
+not provider hits; unknown usage is not zero. Avoid speculative fallback layers.

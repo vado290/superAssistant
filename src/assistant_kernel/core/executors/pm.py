@@ -132,6 +132,8 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
         *([("map", drafts.text_sha(map_text), map_text)] if map_text else []),
         *([("workspace", drafts.text_sha(workspace_text), workspace_text)] if workspace_text else []),
     ]
+    fixed_keys = {"config", "bootstrap", "runtime"}
+    context = [part for part in context if part[0] in fixed_keys] + [part for part in context if part[0] not in fixed_keys]
     documents = await asyncio.to_thread(document_sections, settings, task)
     output = prompt_text("pm-output")
     seen = {key: fingerprint for key, fingerprint, _ in context + documents} | {"output": drafts.text_sha(output)}
@@ -152,19 +154,30 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
         ctx, run, config, prompt, task_id=task_id, stage=stage, session_id=session_id,
         tools=tools, sandbox="danger-full-access" if build else "read-only", candidates=candidates,
         subagents=MAX_SUBAGENTS if matched in SUBAGENT_STAGES else 0, cwd=workspace, images=images,
-        stable_prefix="\n\n".join([f"# Project {run['project_id']} · PM turn ({STAGE_NAMES.get(matched, matched)})",
-                                  *(text for _, _, text in context)]))
+        stable_prefix=None if session_id else "\n\n".join([
+            f"# Project {run['project_id']} · PM turn ({STAGE_NAMES.get(matched, matched)})", output,
+            *(text for key, _, text in context if key in fixed_keys)]))
     misfit = outcome_misfit(parsed, stage)
     if misfit and model_result.physical_session_id:   # tell the PM once, in the same session, instead of failing blind
-        parsed, model_result = await call_for_json(
-            ctx, run, config, misfit + OUTPUT_REMINDER, task_id=task_id, stage=stage,
-            session_id=model_result.physical_session_id, tools=tools,
-            sandbox="danger-full-access" if build else "read-only", candidates=candidates, cwd=workspace)
+        first_result = model_result
+        try:
+            parsed, model_result = await call_for_json(
+                ctx, run, config, misfit + OUTPUT_REMINDER, task_id=task_id, stage=stage,
+                session_id=model_result.physical_session_id, tools=tools,
+                sandbox="danger-full-access" if build else "read-only", candidates=candidates, cwd=workspace,
+                subagents=MAX_SUBAGENTS if matched in SUBAGENT_STAGES else 0)
+        except Exception as exc:
+            from assistant_kernel.core.prompt_cache import preserve_failed_repair
+            preserve_failed_repair(exc, first_result)
+            raise
+        from assistant_kernel.core.prompt_cache import merge_results
+        model_result = merge_results(first_result, model_result)
     if code and build and parsed is not None:   # keep every turn's work as a commit on the task branch
         await asyncio.to_thread(gitdelivery.commit_all, workspace,
                                 f"{task['goal'][:72]}\n\n{str(parsed.get('summary') or '')[:1500]}\n\nTask {task_id}")
     if parsed is None:
-        return {"outcome": "invalid_output", "raw": model_result.final_text[:2000]}
+        return {"outcome": "invalid_output", "raw": model_result.final_text[:2000],
+                "model_metadata": model_result.metadata}
     result = {"outcome": parsed.get("outcome"), "summary": str(parsed.get("summary") or ""),
               "questions": parsed.get("questions") or [], "session_id": model_result.physical_session_id,
               "config_sha256": config.config_sha256, "skills": list(config.skill_labels),
@@ -172,14 +185,14 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
     document = parsed.get("document") if isinstance(parsed.get("document"), dict) else {}
     named, markdown = document.get("kind"), document.get("markdown")
     if (named or markdown) and DOCUMENT_STAGE.get(named) != stage:
-        return {"outcome": "invalid_output", "raw": f"document kind {named!r} does not belong to stage {stage}"}
+        return {**result, "outcome": "invalid_output", "raw": f"document kind {named!r} does not belong to stage {stage}"}
     if not markdown and stage_kind:   # the PM edited the draft through edit_task_document
         draft = await asyncio.to_thread(drafts.load, settings, run["project_id"], task_id, stage_kind)
         current = await asyncio.to_thread(drafts.revision_markdown, settings, run["project_id"],
                                           task["documents"].get(stage_kind))
         edited = str((draft or {}).get("markdown") or "")
         if named == stage_kind and not edited.strip():
-            return {"outcome": "invalid_output", "raw": f"{named} was named but its draft is empty"}
+            return {**result, "outcome": "invalid_output", "raw": f"{named} was named but its draft is empty"}
         if named == stage_kind or edited != current:
             markdown = edited
     delegations = checked_delegations(parsed.get("delegations"))
@@ -230,7 +243,7 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
             # The Model plan (assistant-model-routing): parsed once here, checked by Kernel at build and release.
             from assistant_kernel.core import model_plan
             try:
-                rows = model_plan.parse(markdown)
+                rows = model_plan.parse(markdown, settings)
                 if rows is not None:
                     report["model_plan"] = rows
             except ValueError as exc:
@@ -316,12 +329,12 @@ def render_prompt(header: str, context: list[tuple[str, str, str]], documents: l
     prefix, so repeating unchanged sections is paid in full every turn.
     """
     if previous is None:
-        return "\n\n".join([header, *(text for _, _, text in context),
+        return "\n\n".join([header, output, *(text for _, _, text in context),
                             *(["## Task ledger (facts recorded by Kernel; they win over your memory)\n\n" + state]
                               if state else []),
                             "## Documents in effect\n\n" + ("\n\n".join(t for _, _, t in documents)
                                                              or "(no documents in effect yet)"),
-                            "## This turn\n\n" + turn, output])
+                            "## This turn\n\n" + turn])
     changed = lambda items: [text for key, fingerprint, text in items if previous.get(key) != fingerprint]  # noqa: E731
     changed_documents = changed(documents)
     return "\n\n".join([

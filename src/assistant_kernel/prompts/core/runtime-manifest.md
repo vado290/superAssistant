@@ -55,3 +55,5 @@ services:
   in the repository's working copy; an agent job's `agents/<name>` stays in the project vault. Before running, check
   that the working copy is a clean released main branch; keep runtime data and output apart from version-controlled
   code — Kernel never resets the user's changes.
+
+For a model-planned agent job, set `model_purpose` to its approved Model plan purpose. Kernel resolves that released binding before the agent runs. Legacy jobs may omit it.

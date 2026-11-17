@@ -27,7 +27,7 @@ MVP_TOOLS = frozenset({
     "volcengine_model_status", "volcengine_generate", "volcengine_ocr",
     "read_task_document", "edit_task_document", "list_iterations", "map_lookup", "list_credentials",
     "get_credential", "list_skill_updates", "host_capabilities", "host_submit", "host_status",
-    "kernel_model_catalog",
+    "kernel_model_catalog", "kernel_model_call", "kernel_model_preflight",
 })
 PROJECT_ACCESS_TOOLS = frozenset({"read_portfolio_snapshot", "list_workspace_projects", "list_accessible_projects",
     "read_project_catalog", "read_project_summary", "list_project_tasks", "list_project_history", "list_project_documents", "read_cross_project_document", "request_project_access"})
@@ -39,8 +39,8 @@ DOCUMENT_TOOLS = frozenset({"read_task_document", "edit_task_document"})
 # the map and the credentials (ROUND5). An empty tool list (Supervisor) therefore means "platform tools only".
 PLATFORM_TOOLS = DOCUMENT_TOOLS | PROJECT_ACCESS_TOOLS | {"get_authorized_workspace", "list_recent_history", "list_iterations", "map_lookup",
                                    "list_credentials", "get_credential", "list_skill_updates",
-                                   "host_capabilities", "host_submit", "host_status", "kernel_model_catalog"}
-READ_ONLY_TOOLS = MVP_TOOLS - CANDIDATE_TOOLS - DOCUMENT_TOOLS - {"volcengine_generate", "volcengine_ocr"}
+                                   "host_capabilities", "host_submit", "host_status", "kernel_model_catalog", "kernel_model_preflight"}
+READ_ONLY_TOOLS = MVP_TOOLS - CANDIDATE_TOOLS - DOCUMENT_TOOLS - {"volcengine_generate", "volcengine_ocr", "kernel_model_call", "kernel_model_preflight"}
 
 
 def effective_tools(offered: frozenset[str], configured) -> tuple[str, ...]:
@@ -82,7 +82,8 @@ def load_agent(settings, project_id: str, role: str, *, stage: str | None = None
     if native:
         skills_text = "\n\n".join(part for part in (path_note(vault, config.agent_id), skills_text) if part)
     from assistant_kernel.core import models   # model settings: config/models.yaml (0.46.1)
-    config, _ = models.resolve(settings, "triage" if purpose == "triage" else role, config)
+    config, _ = models.resolve(settings, "triage" if purpose == "triage" else role, config,
+                               project_id=project_id, stage=stage, purpose=purpose)
     return AgentConfig(**{**config.__dict__, "skills_text": skills_text,
                           "skill_labels": tuple(selection.labels),
                           "config_sha256": skill_rules.digest(files + selection.files)})
@@ -281,8 +282,17 @@ async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str,
     """One Codex invocation with the project's model settings and the scoped Kernel tools."""
     settings, harness = ctx.services["settings"], ctx.services["harness"]
     project_id = run["project_id"]
+    fixed_rules = i18n.LANGUAGE_NOTE
     if await ctx.kernel.project_kind(project_id) == "chief_of_staff":
-        prompt += "\n\n" + prompt_text("chief-of-staff")
+        fixed_rules += "\n\n" + prompt_text("chief-of-staff")
+    if not session_id:
+        header, separator, body = prompt.partition("\n\n")
+        prompt = header + "\n\n" + fixed_rules + (separator + body if separator else "")
+        if stable_prefix:
+            prefix_header, prefix_separator, prefix_body = stable_prefix.partition("\n\n")
+            stable_prefix = prefix_header + "\n\n" + fixed_rules + (prefix_separator + prefix_body if prefix_separator else "")
+    from assistant_kernel.core import models
+    route_version = config.route_version or models.version(models.load(settings))
     image_paths = ()
     if images:
         from assistant_kernel.core.images import validate_refs
@@ -290,6 +300,8 @@ async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str,
     invocation_id = f"{run['run_id']}-a{run['attempt']}-{uuid.uuid4().hex[:8]}"
     if settings.project_access_enabled:
         tools = tools | PROJECT_ACCESS_TOOLS
+    if stage != "build":
+        tools = tools - {"kernel_model_preflight"}
     allowed = effective_tools(tools, config.allowed_tools)
     model, effort, window, compact = config.model, config.reasoning_effort, None, None
     if hasattr(harness, "resolve_model_profile"):
@@ -337,7 +349,7 @@ async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str,
             model=model,
             session_reused=bool(session_id),
         )
-        return await harness.run_turn(AgentTurnRequest(
+        result = await harness.run_turn(AgentTurnRequest(
             project_id=project_id, prompt=final_prompt,
             cwd=cwd or agent_home(settings, project_id, config.agent_id),
             physical_session_id=session_id, provider=config.provider, model=model, reasoning_effort=effort,
@@ -346,6 +358,12 @@ async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str,
             invocation_id=invocation_id, cancel_event=ctx.cancel, scoped_tools=allowed, scope_context=scope_context,
             multi_agent_enabled=subagents > 0, max_concurrent_subagents=subagents, image_paths=image_paths,
             prompt_cache=cache_meta))
+        from dataclasses import replace
+        from assistant_kernel.core import models
+        return replace(result, metadata={**result.metadata, "actual_route": {
+            "profile": config.profile, "source": config.route_source, "provider": config.provider or settings.default_codex_provider,
+            "model": model, "reasoning_effort": effort, "engine": "codex",
+            "config_version": route_version}})
     finally:
         sharing.cancel()
         await asyncio.to_thread(sync, settings, project_id, direction="out")
@@ -358,7 +376,14 @@ async def call_for_json(ctx, run, config, prompt, **kwargs) -> tuple[dict[str, A
     if parsed is None and result.physical_session_id:
         fix = ("Your last message was not a valid JSON object. Follow the output requirements exactly: output only that "
                "JSON object and do no new work.")
-        result = await call_model(ctx, run, config, fix,
-                                  **{**kwargs, "session_id": result.physical_session_id, "images": ()})
+        first = result
+        try:
+            result = await call_model(ctx, run, config, fix,
+                                      **{**kwargs, "session_id": result.physical_session_id, "images": (),
+                                         "stable_prefix": None})
+        except Exception as exc:
+            prompt_cache.preserve_failed_repair(exc, first)
+            raise
+        result = prompt_cache.merge_results(first, result)
         parsed = parse_json_object(result.final_text)
     return parsed, result

@@ -160,6 +160,7 @@ class CodexCliHarness:
             runtime_overrides.extend([
                 "-c", f'model_provider="{request.provider}"',
             ])
+        before_usage = self.read_native_context_usage(codex_home, request.physical_session_id) if request.physical_session_id else None
         invocation_id = request.invocation_id or uuid.uuid4().hex
         archive_dir = runtime.vault_root / "runs" / "agent-traces" / "invocations" / invocation_id
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -300,16 +301,34 @@ class CodexCliHarness:
             f"vault://{request.project_id}/"
             f"{archive_path.relative_to(runtime.vault_root).as_posix()}"
         )
+        from assistant_kernel.model_providers.chat import CatalogChatProvider
+        raw_usage = next((e.get("usage") for e in reversed(parsed.events) if e.get("type") == "turn.completed"), None)
+        from assistant_kernel.core.prompt_cache import cumulative_delta
+        after_total = native_usage[2] if native_usage and native_usage[2] else raw_usage
+        before_total = before_usage[2] if before_usage else None
+        delta = cumulative_delta(after_total, before_total, fresh=not request.physical_session_id,
+                                 same_session=not request.physical_session_id or request.physical_session_id == parsed.physical_session_id)
+        invocation = CatalogChatProvider.normalize_usage(delta)
+        invocation["usage_source"] = "session_total_delta"
+        invocation["session_raw_usage"] = after_total
+        invocation["baseline_known"] = not request.physical_session_id or before_total is not None
+        usage_metadata.update(context_usage=context_usage.model_dump(),
+                              session_total_usage=after_total,
+                              invocation_usage=invocation, invocation_usage_source="session_total_delta",
+                              invocations=[{"invocation_id": invocation_id, "usage": invocation,
+                                            "source": "session_total_delta", "scope": "invocation"}],
+                              subagent_usage_coverage="unknown")
         cache = dict(request.prompt_cache.get("prompt_cache") or {})
         if cache:
-            cached = context_usage.cached_input_tokens
-            total_input = context_usage.input_tokens
+            cached = invocation["cached_input_tokens"]
+            total_input = invocation["input_tokens"]
             cache.update({
                 "cached_input_tokens": cached,
                 "input_tokens": total_input,
-                "cache_hit": cached > 0,
-                "cache_hit_ratio": round(cached / total_input, 4) if total_input else None,
-                "usage_source": usage_metadata["usage_source"],
+                "cache_hit": invocation["cache_hit"],
+                "cache_hit_ratio": invocation["cache_hit_ratio"],
+                "usage_source": "session_total_delta",
+                "usage_scope": "invocation",
             })
             usage_metadata["prompt_cache"] = cache
         usage_metadata['mcp_runtime'] = {'receipt_count':len(mcp_receipts),

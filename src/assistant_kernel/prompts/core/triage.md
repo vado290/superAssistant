@@ -16,3 +16,5 @@ One JSON object only — no code fences and no other text; reply, goal and reaso
 {"decision": "chat | start_task", "reply": "what you say to the user", "goal": "the task's goal (required for start_task)", "reason": "why"}
 
 Unused fields may be left out.
+
+For a request to change the model of an existing product capability, return decision="consult" with a short reply. Kernel forwards it to a separate Supervisor consultation without changing the active task. Adding product behavior still follows the task flow.

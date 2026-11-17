@@ -76,7 +76,8 @@ def status(settings) -> dict[str, dict[str, Any]]:
         spec = model_catalog.VENDORS.get(vendor) or {}
         stored = providers.get(vendor) if isinstance(providers.get(vendor), dict) else {}
         if spec.get("auth") == "codex_login":
-            configured, how = True, "codex login"
+            auth_files = (getattr(settings, "data_root", path(settings).parent.parent) / "vaults").glob("*/runtime/codex-home/auth.json")
+            configured, how = any(p.is_file() for p in auth_files), "codex login present (capability not verified)"
         else:
             configured = bool(stored.get("enabled", True) and stored.get("api_key"))
             how = "key"
@@ -107,10 +108,13 @@ def put(settings, vendor: str, api_key: str, *, validated: bool, base_url: str =
         data = _read(target)
         providers = data.setdefault("providers", {})
         entry = dict(providers.get(vendor) or {})
-        entry.update(enabled=True, api_key=api_key.strip(), provider_type="openai_compatible",
+        entry.update(enabled=True, api_key=api_key.strip(),
                      validated_at=_now() if validated else None, failing=None, updated_at=_now(), source=source)
+        entry.setdefault("provider_type", "openai_compatible")
         if base_url:
             entry["openai_compatible_base_url"] = base_url.rstrip("/")
+        elif not entry.get("openai_compatible_base_url") and not entry.get("native_base_url"):
+            entry["openai_compatible_base_url"] = model_catalog.base_url(vendor)
         if region:
             entry["region"] = region
         providers[vendor] = entry
@@ -148,15 +152,21 @@ def credential(settings, vendor: str):
     return ProviderCredential.model_validate(entry) if isinstance(entry, dict) else None
 
 
-def probe(vendor: str, api_key: str, *, base_url: str = "", timeout: float = PROBE_TIMEOUT_SECONDS) -> str:
+def probe(vendor: str, api_key: str, *, base_url: str = "", timeout: float = PROBE_TIMEOUT_SECONDS, protocol: str = "openai_chat") -> str:
     """Check a key with one cheap real call: "valid", "rejected" (401/403) or "unverified" (anything else, e.g. an
     endpoint without a model list or no network). Only "rejected" stops a key from being stored."""
     import httpx
     url = (base_url or model_catalog.base_url(vendor) or "").rstrip("/")
     if not url:
         return "unverified"
+    headers = {"Authorization": f"Bearer {api_key.strip()}"}
+    params = None
+    if protocol == "anthropic_messages":
+        headers = {"x-api-key": api_key.strip(), "anthropic-version": "2023-06-01"}
+    elif protocol == "gemini":
+        headers, params = {}, {"key": api_key.strip()}
     try:
-        response = httpx.get(f"{url}/models", headers={"Authorization": f"Bearer {api_key.strip()}"}, timeout=timeout)
+        response = httpx.get(f"{url}/models", headers=headers, params=params, timeout=timeout)
     except httpx.HTTPError:
         return "unverified"
     if response.status_code in (401, 403):
@@ -180,6 +190,8 @@ def apply_setup_answer(settings, spec: dict[str, Any], answer: str) -> str:
         return "(model setup: skipped by the user)"
     if word in DEFER_WORDS:
         return "(model setup: deferred until release by the user; add defer_until: release to the rows of this vendor)"
+    if text.startswith("{"):
+        return _structured_setup(settings, spec, text)
     vendor = str(spec.get("recommended_vendor") or "dashscope").strip().lower()
     base_url = ""
     named = re.match(r"^([a-z][a-z0-9_]*)\s*[:：]\s*(\S.*)$", text)
@@ -194,8 +206,94 @@ def apply_setup_answer(settings, spec: dict[str, Any], answer: str) -> str:
         return f"(model setup: {vendor} uses the Codex login; nothing to store)"
     if vendor not in model_catalog.VENDORS:
         return f"(model setup: not saved — unknown vendor {vendor})"
+    existing = credential(settings, vendor)
+    if existing and existing.api_key.get_secret_value():
+        old_endpoint = existing.openai_compatible_base_url or existing.native_base_url
+        if text != existing.api_key.get_secret_value() or (base_url and base_url.rstrip('/') != old_endpoint.rstrip('/')):
+            return "(model setup: use a new provider instance ID for a different account or endpoint; existing credential and routes retained)"
+        return f"(model setup: configured {vendor}; existing credential reused)"
     result = probe(vendor, text, base_url=base_url)
     if result == "rejected":
         return f"(model setup: rejected by {vendor}; the key was not saved)"
     put(settings, vendor, text, validated=result == "valid", base_url=base_url)
     return f"(model setup: configured {vendor}" + ("" if result == "valid" else "; the key could not be verified yet") + ")"
+
+
+def _structured_setup(settings, spec: dict, text: str) -> str:
+    """Private card payload: split credentials from public candidate profile; never activate a route here."""
+    import re
+    from assistant_kernel.core import models
+    try:
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError
+        vendor = str(payload.get("provider") or spec.get("recommended_vendor") or "dashscope")
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", vendor):
+            raise ValueError
+        capability = str(spec.get("capability") or payload.get("capability") or "chat")
+        model = str(payload.get("model") or spec.get("model") or "").strip()
+        protocol = str(payload.get("protocol") or spec.get("protocol") or "openai_chat")
+        from assistant_kernel.core.model_gateway import PROTOCOL_TYPES
+        if capability not in model_catalog.CAPABILITIES or capability == "agent" or protocol not in PROTOCOL_TYPES or not model:
+            raise ValueError
+        existing_credential = credential(settings, vendor)
+        stored_endpoint = (existing_credential.openai_compatible_base_url or existing_credential.native_base_url) if existing_credential else ''
+        endpoint = str(payload.get("base_url") or stored_endpoint or model_catalog.base_url(vendor, protocol) or "").rstrip("/")
+        from urllib.parse import urlparse
+        parsed = urlparse(endpoint)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError
+        key = str(payload.get("api_key") or "").strip()
+        if not key:
+            existing = credential(settings, vendor)
+            key = existing.api_key.get_secret_value() if existing else ""
+        if not key:
+            return "(model setup: missing credential; no profile was activated)"
+        existing_credential = credential(settings, vendor)
+        if existing_credential and existing_credential.api_key.get_secret_value():
+            existing_key = existing_credential.api_key.get_secret_value()
+            old_endpoint = existing_credential.openai_compatible_base_url or existing_credential.native_base_url
+            if key != existing_key or (old_endpoint and endpoint != old_endpoint.rstrip("/")):
+                return "(model setup: use a new provider instance ID for a different account or endpoint; existing credential and routes retained)"
+        result = probe(vendor, key, base_url=endpoint, protocol=protocol)
+        if result == "rejected":
+            return "(model setup: rejected; previous credential and route retained)"
+        name = str(payload.get("profile") or f"{vendor}.{capability}.{model}")
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}", name):
+            raise ValueError
+        candidate = {"capability": capability, "vendor": vendor, "provider": vendor,
+                     "model": model, "protocol": protocol, "base_url": endpoint}
+        current = models.profiles(settings)
+        if name in current and current[name] != candidate:
+            return "(model setup: profile name already exists; choose a new profile name so active routes stay unchanged)"
+        if not existing_credential or not existing_credential.api_key.get_secret_value():
+            put(settings, vendor, key, validated=result == "valid", base_url=endpoint,
+                region=str(payload.get("region") or ""))
+        def add(data):
+            data.setdefault("schema_version", "kernel-models.v2")
+            existing = data.setdefault("profiles", {}).get(name)
+            if existing is not None and existing != candidate:
+                raise ValueError("profile changed during setup")
+            data["profiles"][name] = candidate
+        models.update(settings, add)
+        return f"(model setup: configured {vendor}; candidate profile {name}; use it in the Model plan or model-change proposal; capability not yet verified)"
+    except (ValueError, TypeError, KeyError):
+        return "(model setup: invalid structured setup; check provider, model, capability, protocol and HTTPS base_url; route unchanged)"
+
+
+def capability_evidence(settings, route, *, success=False):
+    """Private-store proof bound to public connection and credential revision; never exposes the key."""
+    import hashlib
+    fields = {key: route.get(key) for key in ("provider", "model", "protocol", "base_url", "capability")}
+    fields["parameters"] = route.get("spec", {}).get("parameters") or {}
+    with _locked(settings) as target:
+        data = _read(target)
+        entry = (data.get("providers") or {}).get(route["provider"])
+        if not entry:
+            return None
+        identity = hashlib.sha256(json.dumps({**fields, "credential_revision": entry.get("updated_at"),
+            "credential": entry.get("api_key")}, sort_keys=True).encode()).hexdigest()
+        if success:
+            entry.setdefault("capability_evidence", {})[identity] = {**fields, "verified_at": _now()}
+            _write(target, data)
+        return (entry.get("capability_evidence") or {}).get(identity)

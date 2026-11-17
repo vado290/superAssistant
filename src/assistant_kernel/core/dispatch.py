@@ -89,7 +89,8 @@ class Dispatcher:
         except Exception as exc:  # executor failure: let the Kernel retry or hand it to the user
             log.exception("run %s failed", run["run_id"])
             # A publish may have partly applied files: never retry it blindly, go to reconciliation.
-            await self._report_failure(run, {"type": type(exc).__name__, "message": str(exc)[:2000]},
+            await self._report_failure(run, {"type": type(exc).__name__, "message": str(exc)[:2000],
+                                            **({"model_metadata": exc.model_metadata} if hasattr(exc, "model_metadata") else {})},
                                        retryable=run["run_type"] != "publish")
             return
         finally:

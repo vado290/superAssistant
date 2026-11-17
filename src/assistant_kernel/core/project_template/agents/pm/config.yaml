@@ -21,3 +21,4 @@ tools:
 - volcengine_model_status
 - volcengine_generate
 - volcengine_ocr
+- kernel_model_call

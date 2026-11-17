@@ -52,6 +52,9 @@ class GatewayService:
     async def _receive_message(self, channel_id, user_id, message_id, text, attachments, route):
         project_id, role = route
         command = text.strip().split()
+        if command and command[0] == "/models" and len(command) > 1:
+            return await self.kernel.receive(project_id, role="supervisor", text=" ".join(command[1:]),
+                channel="discord", chat_id=channel_id, user_id=user_id, external_event_id=f"msg:{message_id}")
         if command and command[0] in ("/status", "/pending", "/cancel", "/evolve", "/jobs", "/iterations", "/grants",
                           "/secrets", "/models"):   # commands
             if command[0] == "/models":
@@ -314,18 +317,22 @@ class GatewayService:
         settings = self.kernel.settings
         harness = CodexCliHarness(ProjectRuntimeManager(settings.data_root))
         lines = [t("cmd.models_header", file=str(models.path(settings)))]
+        entries = [("pm", "manager", None), ("supervisor", "supervisor", None), ("triage", "manager", None)]
+        if models.load(settings).get("schema_version") == "kernel-models.v2":
+            entries = [("pm", "manager", "build"), ("pm", "manager", "design"), ("pm", "manager", "review"),
+                       ("supervisor", "supervisor", None), ("triage", "manager", None)]
         for project in await self.kernel.active_projects():
-            for role, agent in (("pm", "manager"), ("supervisor", "supervisor"), ("triage", "manager")):
+            for role, agent, stage in entries:
                 try:
                     config, _ = AgentLoader(settings).load(project, f"project:{project}:{agent}")
-                    config, source = models.resolve(settings, role, config)
+                    config, source = models.resolve(settings, role, config, project_id=project, stage=stage)
                     profile = await harness.resolve_model_profile(
                         project_id=project, provider=config.provider or settings.default_codex_provider,
                         model=config.model, reasoning_effort=config.reasoning_effort,
                         context_policy=config.context_policy,
                         custom_context_window_tokens=config.model_context_window_tokens,
                         custom_auto_compact_token_limit=config.model_auto_compact_token_limit)
-                    lines.append(t("cmd.models_line", project=project, role=role, model=profile.model,
+                    lines.append(t("cmd.models_line", project=project, role=f"{role}.{stage}" if stage else role, model=profile.model,
                                    effort=profile.reasoning_effort or "-", profile=source["profile"],
                                    model_source=source["model"], effort_source=source["reasoning_effort"]))
                 except Exception as exc:   # shown to the user: this is what a run would fail with

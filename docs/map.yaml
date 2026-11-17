@@ -408,3 +408,14 @@ entries:
 - path: tests/core/test_chief_of_staff.py
   kind: test
   purpose: Chief of Staff identity, review profiles, bootstrap retry and Discord entry points
+
+- path: src/assistant_kernel/core/model_gateway.py
+  kind: module
+  purpose: Purpose-bound product model calls and honest adapter availability
+- path: tests/test_model_routes.py
+  kind: test
+  purpose: Unified model routes, gateway requests, frozen release binding and cache usage regression
+
+- path: tests/core/test_model_operation.py
+  kind: test
+  purpose: Model consultation approval, active task preservation and secret setup resume

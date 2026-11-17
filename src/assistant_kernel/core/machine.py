@@ -32,6 +32,7 @@ DECISION_ACTIONS = {
     "project_access_request": ("approve", "reject"),
     "followups": ("approve", "reject"),
     "shared_update": ("approve", "reject"),
+    "model_change": ("approve", "reject"),
 }
 MAX_SHARED_UPDATE = 4000
 MAX_FOLLOWUPS = 5
@@ -389,9 +390,9 @@ def is_cursor(task: dict[str, Any] | None, run: dict[str, Any]) -> bool:
 
 # ---------------------------------------------------------------- run results
 
-async def on_result(c, run: dict[str, Any], result: dict[str, Any]) -> None:
+async def on_result(c, run: dict[str, Any], result: dict[str, Any], *, settings=None) -> None:
     if run["run_type"] == "supervisor" and run["purpose"] == "consult":
-        return await _consult_result(c, run, result)
+        return await _consult_result(c, run, result, settings=settings)
     if run["run_type"] == "supervisor" and run["purpose"] == "observe":
         return await _observe_result(c, run, result)
     if run["run_type"] == "triage":
@@ -406,7 +407,10 @@ async def on_result(c, run: dict[str, Any], result: dict[str, Any]) -> None:
         return
     handler = {"pm_turn": _pm_result, "supervisor": _supervisor_result, "validation": _validation_result,
                "publish": _publish_result, "bootstrap": _bootstrap_result}[run["run_type"]]
-    await handler(c, task, run, result)
+    if run["run_type"] == "publish":
+        await handler(c, task, run, result, settings=settings)
+    else:
+        await handler(c, task, run, result)
 
 
 async def _pm_result(c, task, run, result) -> None:
@@ -620,17 +624,25 @@ async def _validation_result(c, task, run, result) -> None:
     await to_supervising(c, task, "validation_passed" if result.get("passed") else "validation_failed")
 
 
-async def _publish_result(c, task, run, result) -> None:
+async def _publish_result(c, task, run, result, *, settings=None) -> None:
     outcome = result.get("outcome")
     if outcome == "published":
-        await _finish_publish(c, task, result, "published")
+        await _finish_publish(c, task, result, "published", settings=settings, run=run)
     elif outcome == "failed":
         await to_supervising(c, task, "publish_failed", error=result.get("error"))
     else:
         await to_awaiting(c, task, _decision(task, "reconcile", t("mx.reconcile_unsure")))
 
 
-async def _finish_publish(c, task, result, reason):
+async def _finish_publish(c, task, result, reason, *, settings=None, run=None):
+    if settings is not None and run:
+        from assistant_kernel.core.model_plan import activate_release
+        try:
+            receipt = activate_release(settings, task, run)
+        except (ValueError, OSError):
+            return await to_awaiting(c, task, _decision(task, "reconcile", t("mx.reconcile_unsure")))
+        if receipt:
+            await event(c, task["project_id"], "model_routes_activated", task_id=task["task_id"], **receipt)
     if "manifest_sha" in result:
         await event(c, task["project_id"], "runtime_manifest_published", task_id=task["task_id"],
                     manifest_sha=result["manifest_sha"])
@@ -725,7 +737,7 @@ async def _upgrade_item(c, task, old_item, proposal: dict[str, Any]) -> None:
     return new
 
 
-async def _consult_result(c, run, result) -> None:
+async def _consult_result(c, run, result, *, settings=None) -> None:
     if not result.get("reply"):
         raise InvalidResult("a consultation must reply to the user")
     message = await one(c, "SELECT * FROM core.messages WHERE message_id=%s", (run["input"]["message_id"],))
@@ -741,6 +753,43 @@ async def _consult_result(c, run, result) -> None:
     if result.get("propose_new_task"):
         await _remember_image_context(c, message, result)
         await _propose_new_task(c, run, result["propose_new_task"], message["message_id"])
+    setup_questions = result.get("model_setup_questions")
+    if setup_questions:
+        questions = _checked_questions(setup_questions)
+        if not all(isinstance(q.get("model_setup"), dict) for q in questions):
+            raise InvalidResult("model setup consultation questions need model_setup metadata")
+        await cards.add_item(c, run["project_id"], cards.new_item(
+            target_kind="consultation", target_id=str(run["run_id"]), kind="questions", origin="supervisor",
+            content={"message": t("mx.model_setup_q"), "questions": questions, "model_setup_only": True}))
+    proposal = result.get("propose_model_change")
+    if isinstance(proposal, dict) and settings is not None:
+        from assistant_kernel.core import models, model_gateway
+        try:
+            if proposal.get("scope", "project") != "project":
+                raise ValueError("this action changes an existing project purpose; global defaults need a Kernel configuration task")
+            purpose, name = str(proposal.get("purpose") or ""), str(proposal.get("profile") or "")
+            data = models.load(settings)
+            old_name = ((data.get("projects") or {}).get(run["project_id"]) or {}).get("purposes", {}).get(purpose)
+            if not old_name:
+                raise ValueError("purpose is not released; adding a capability requires a product task")
+            old = models.profiles(settings, data)[old_name]
+            capability = old.get("capability", "agent")
+            selected = models.route(settings, capability, profile=name, data=data)
+            if capability == "embedding" and name != old_name:
+                raise ValueError("embedding changes require an index migration task")
+            state = model_gateway.availability(settings, selected)
+            if not state["callable"]:
+                raise ValueError(f"target model requires setup before proposing this change: {state}")
+            if capability != "agent" and not state["verified"]:
+                raise ValueError("target capability needs a successful build preflight before operation switching; use a product task")
+            change = {"purpose": purpose, "profile": name, "before": old_name, "capability": capability,
+                      "expected_version": models.version(data), "reason": str(proposal.get("reason") or "")[:1000]}
+            await cards.add_item(c, run["project_id"], cards.new_item(
+                target_kind="consultation", target_id=str(run["run_id"]), kind="decision", origin="supervisor",
+                content={"decision": "model_change", "message": t("mx.model_change_q", purpose=purpose,
+                         before=old_name, profile=name), "actions": ["approve", "reject"], "data": change}))
+        except (ValueError, KeyError) as exc:
+            await notify(c, run["project_id"], "supervisor", t("mx.model_change_error", error=str(exc)))
     shared = result.get("propose_shared_update")
     if isinstance(shared, dict) and "shared_context" in (result.get("_capabilities") or ()):
         await cards.add_item(c, run["project_id"], cards.new_item(
@@ -815,6 +864,9 @@ async def _triage_result(c, run, result) -> None:
     message = await one(c, "SELECT * FROM core.messages WHERE message_id=%s", (run["input"]["message_id"],))
     chat = {"channel": message["channel"], "chat_id": message["chat_id"], "user_id": message["user_id"]}
     reply = str(result.get("reply") or "").strip()
+    if decision == "consult":
+        await consult(c, project_id, message)
+        return
     if run["input"].get("context_task_id"):
         return await _busy_triage_result(c, run, result, message, chat, reply)
     if decision == "chat":
@@ -1131,7 +1183,7 @@ async def on_action(c, project_id: str, item_id: str, action: str, values: dict[
             lines.append(values["text"])
         await notify(c, project_id, "supervisor", "\n\n".join(lines))
     if item["target"]["kind"] in ("consultation", "project_access_request"):
-        return await _consultation_action(c, project_id, item, action, source_message_id)
+        return await _consultation_action(c, project_id, item, action, source_message_id, settings=settings, values=values)
     task = await load_task(c, item["target"]["id"])
     if not task or task["state"] != "awaiting_user":
         raise cards.StaleItem("the task is no longer waiting for this item")
@@ -1251,6 +1303,9 @@ async def _decision_action(c, task, item, action, values, source_message_id, *, 
             raise ValueError(t("mx.model_gate", error=error))
         approvals = {**task["approvals"], "release": {"bundle_sha": data["bundle_sha"], "review_sha": data["review_sha"],
                                                       "message_id": _str(source_message_id)}}
+        if settings is not None:
+            from assistant_kernel.core.model_plan import release_bindings
+            approvals["release"]["model_bindings"] = release_bindings(settings, task)
         return await to_publishing(c, await _update(c, task, approvals=approvals))
     if decision in ("complete", "cancel"):
         if action == "reject":
@@ -1323,7 +1378,7 @@ async def _decision_action(c, task, item, action, values, source_message_id, *, 
             run = await one(c, "SELECT * FROM core.runs WHERE task_id=%s AND run_type='publish' ORDER BY created_at DESC LIMIT 1",
                             (task["task_id"],))
             result = await asyncio.to_thread(reconcile_publication, settings, task, run)
-            return await _finish_publish(c, task, result, "published_after_reconcile")
+            return await _finish_publish(c, task, result, "published_after_reconcile", settings=settings, run=run)
         return await to_supervising(c, task, "publish_failed", error="user reported failure")
     if decision == "run_failed":
         if action == "stop":
@@ -1348,10 +1403,44 @@ def _shared_update(proposal: dict[str, Any]) -> dict[str, str]:
     return data
 
 
-async def _consultation_action(c, project_id, item, action, source_message_id):
+async def _consultation_action(c, project_id, item, action, source_message_id, *, settings=None, values=None):
+    if item["kind"] == "questions" and item["content"].get("model_setup_only"):
+        if action == "stop":
+            return {}
+        if action not in ("submit", "revise"):
+            raise ValueError("model setup questions accept submit, revise or stop")
+        answers = (values or {}).get("answers") or {}
+        if action == "submit" and any(q.get("required", True) and not answers.get(q["id"])
+                                      for q in item["content"]["questions"]):
+            raise ValueError("required model setup questions are unanswered")
+        active = await one(c, "SELECT task_id FROM core.tasks WHERE project_id=%s AND state = ANY(%s)",
+                           (project_id, list(rules.ACTIVE_STATES)))
+        await enqueue(c, project_id, "supervisor", "consult", {
+            "message_id": str(source_message_id), "context_task_id": str(active["task_id"]) if active else None,
+            "model_setup_result": {"questions": item["content"]["questions"], "answers": answers,
+                                   "note": (values or {}).get("text", "")}})
+        return {}
     data = item["content"]["data"]
-    if item["content"]["decision"] not in ("new_task", "shared_update", "grant", "project_access_request") or action not in ("approve", "reject"):
+    if item["content"]["decision"] not in ("new_task", "shared_update", "grant", "project_access_request", "model_change") or action not in ("approve", "reject"):
         raise ValueError("consultation items accept approve or reject")
+    if item["content"]["decision"] == "model_change":
+        if action == "reject":
+            return {}
+        from assistant_kernel.core import models, model_gateway
+        selected = models.route(settings, data["capability"], profile=data["profile"])
+        state = model_gateway.availability(settings, selected)
+        if not state["callable"] or (data["capability"] != "agent" and not state["verified"]):
+            raise ValueError("target model is no longer verified and callable; previous route remains active")
+        receipt = models.bind(settings, project_id, {data["purpose"]: data["profile"]},
+                              expected_version=data["expected_version"], receipt="operation:" + str(item["item_id"]))
+        await insert_iteration(c, project_id, None, kind="imported", source="supervisor",
+                               title=t("mx.model_change_title", purpose=data["purpose"]), reason=data["reason"],
+                               changes=[{"type": "model", "target": data["purpose"], "action": "modify",
+                                         "before": data["before"], "after": data["profile"]}],
+                               facts={"approval_message_id": _str(source_message_id), **receipt})
+        await notify(c, project_id, "supervisor", t("mx.model_change_done", purpose=data["purpose"],
+                     profile=data["profile"], version=receipt["config_version"]))
+        return receipt
     if item["content"]["decision"] == "grant":
         if action == "approve":
             await grant_directory(c, project_id, data["directory"], reason=data["directory"]["purpose"],

@@ -791,7 +791,7 @@ class Kernel:
                 return
             try:
                 async with c.transaction():
-                    await machine.on_result(c, held, result)
+                    await machine.on_result(c, held, result, settings=self.settings)
             except machine.InvalidResult as exc:
                 await self._fail(c, held, {"type": "invalid_result", "message": str(exc)}, retryable=True)
             except Exception as exc:   # a Kernel bug: running the model again cannot fix it, so tell the user now

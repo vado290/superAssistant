@@ -8,7 +8,7 @@ then decides deterministically — never from what a model says about setup:
   postpones a row to the release gate);
 - `estimate`: a monthly budget estimate from `volume` × catalog prices (unknown stays unknown, never 0).
 
-No block means the task calls no model, and nothing changes for it.
+No block means legacy/undeclared; it is not evidence that no model is called.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ UNITS = ("tokens", "calls", "turns", "audio_minutes", "characters")
 BUILD_GATES = {("design", "build"), ("requirements", "build")}
 
 
-def parse(markdown: str) -> list[dict[str, Any]] | None:
+def parse(markdown: str, settings=None) -> list[dict[str, Any]] | None:
     """The plan's rows, normalised; None when the document has no model_plan block. Raises ValueError."""
     blocks = [b for b in BLOCK.findall(markdown or "") if re.match(r"\s*(#.*\n\s*)*model_plan\s*:", b)]
     if not blocks:
@@ -44,10 +44,10 @@ def parse(markdown: str) -> list[dict[str, Any]] | None:
         return []
     if not isinstance(rows, list) or len(rows) > MAX_ROWS:
         raise ValueError(f"model_plan must be a list of at most {MAX_ROWS} rows")
-    return validate(rows)
+    return validate(rows, settings)
 
 
-def validate(rows: list[Any]) -> list[dict[str, Any]]:
+def validate(rows: list[Any], settings=None) -> list[dict[str, Any]]:
     normalised, seen = [], set()
     for number, row in enumerate(rows, 1):
         if not isinstance(row, dict):
@@ -64,7 +64,12 @@ def validate(rows: list[Any]) -> list[dict[str, Any]]:
         if not PURPOSE.fullmatch(purpose):
             raise ValueError(f"{where}: purpose must be lowercase letters, digits, '.', '_' or '-', like daily-brief.write")
         try:
-            name, spec = model_catalog.resolve_profile(capability, row.get("profile"))
+            if settings is None:
+                name, spec = model_catalog.resolve_profile(capability, row.get("profile"))
+            else:
+                from assistant_kernel.core import models
+                selected = models.route(settings, capability, profile=None if row.get("profile") in (None, "", "default") else row["profile"])
+                name, spec = selected["profile"], selected["spec"]
         except ValueError as exc:
             raise ValueError(f"{where}: {exc}") from exc
         defer = row.get("defer_until")
@@ -80,7 +85,8 @@ def validate(rows: list[Any]) -> list[dict[str, Any]]:
             "capability": capability, "purpose": purpose, "profile": name, "vendor": spec["vendor"],
             "model": spec["model"], "required": row.get("required", True) is not False,
             "defer_until": "release" if defer == "release" else None, "volume": volume or {},
-            "covers": [str(c) for c in row.get("covers") or []][:20]})
+            "covers": [str(c) for c in row.get("covers") or []][:20],
+            "implementation_required": bool(row.get("implementation_required", False))})
     if len({r["purpose"] for r in normalised}) != len(normalised):
         raise ValueError("model_plan: each row needs its own purpose")
     return normalised
@@ -177,23 +183,46 @@ def gate_errors(settings, task: dict[str, Any], targets) -> dict[str, str]:
         return {}
     from assistant_kernel.core import model_secrets
     current = model_secrets.status(settings)
-    return {t: e for t in relevant if (e := gate_error(task, t, current))}
+    errors = {t: e for t in relevant if (e := gate_error(task, t, current))}
+    from assistant_kernel.core import models, model_gateway
+    for target in relevant:
+        gate = gate_kind(task, target)
+        for row in document.get("model_plan") or []:
+            if not row["required"] or (gate == "build" and row.get("defer_until") == "release"):
+                continue
+            try:
+                selected = models.route(settings, row["capability"], profile=row["profile"])
+                state = model_gateway.availability(settings, selected)
+                if not state["adapter_available"] and gate == "build" and row.get("implementation_required"):
+                    continue
+                if gate == "release" and row["capability"] != "agent" and state["callable"] and not state["verified"]:
+                    errors[target] = f"model capability test missing for {row['id']}: run the approved build preflight before release"
+                if not state["callable"]:
+                    errors[target] = f"model setup missing for {row['id']} {row['capability']}: {state}"
+            except ValueError as exc:
+                errors[target] = f"model setup missing for {row['id']}: {exc}"
+    return errors
 
 
 def catalog_view(settings, task: dict[str, Any] | None = None) -> dict[str, Any]:
     """What `kernel_model_catalog` returns: never a key."""
     from assistant_kernel.core import model_secrets
     current = model_secrets.status(settings)
+    from assistant_kernel.core import models, model_gateway
     view: dict[str, Any] = {
         "capabilities": {c: {"default_profile": model_catalog.DEFAULT_PROFILE[c],
                              "available_via": list(model_catalog.AVAILABLE_VIA.get(c, ()))}
                          for c in model_catalog.CAPABILITIES},
         "profiles": {name: {**spec, "price_cny": model_catalog.PRICES.get(spec["model"])}
-                     for name, spec in model_catalog.PROFILES.items()},
+                     for name, spec in models.profiles(settings).items()},
         "vendors": {v: {"name": (model_catalog.VENDORS.get(v) or {}).get("name", v), **s} for v, s in current.items()},
         "price_date": model_catalog.CHECKED,
         "price_note": f"budget estimates in CNY (USD at {model_catalog.USD_CNY}); not billing facts",
     }
+    view["config_version"] = models.version(models.load(settings))
+    for name, spec in view["profiles"].items():
+        selected = models.route(settings, spec.get("capability", "agent"), profile=name)
+        spec["availability"] = model_gateway.availability(settings, selected)
     if task:
         document = (task.get("documents") or {}).get(plan_document(task)) or {}
         if document.get("model_plan_error"):
@@ -206,3 +235,27 @@ def catalog_view(settings, task: dict[str, Any] | None = None) -> dict[str, Any]
         else:
             view["task_plan"] = None
     return view
+
+
+def release_bindings(settings, task):
+    """Capture approved purpose choices; empty/legacy plans never erase released routes."""
+    from assistant_kernel.core import models
+    document = (task.get("documents") or {}).get(plan_document(task)) or {}
+    rows = document.get("model_plan") or []
+    return {"document_sha": document.get("sha256"), "config_version": models.version(models.load(settings)),
+            "purposes": {row["purpose"]: row["profile"] for row in rows},
+            "profiles": {row["profile"]: models.route(settings, row["capability"], profile=row["profile"])["spec"]
+                         for row in rows}}
+
+
+def activate_release(settings, task, run):
+    from assistant_kernel.core import models
+    frozen = (task.get("approvals") or {}).get("release", {}).get("model_bindings") or {}
+    if not frozen.get("purposes"):
+        return None
+    # A changed profile needs a refreshed release approval, not silent activation of a different model.
+    for name, spec in frozen["profiles"].items():
+        actual = models.route(settings, spec.get("capability", "agent"), profile=name)["spec"]
+        if actual != spec:
+            raise ValueError("approved model profile changed; reconcile configuration before completing release")
+    return models.bind(settings, task["project_id"], frozen["purposes"], receipt=str(run["run_id"]))

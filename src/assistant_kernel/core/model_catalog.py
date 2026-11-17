@@ -67,9 +67,10 @@ DEFAULT_PROFILE = {"agent": "agent.standard", "chat": "chat.economy", "vision": 
 # What can call a capability today (phase 1). Empty = planned in the design, not callable yet (no ModelGateway).
 AVAILABLE_VIA: dict[str, tuple[str, ...]] = {
     "agent": ("jobs.yaml agent job", "project agent run by Kernel"),
-    "chat": ("volcengine_generate (Volcengine only, until the gateway lands)",),
-    "ocr": ("volcengine_ocr (Volcengine only, until the gateway lands)",),
-    "vision": (), "asr": (), "tts": (), "embedding": (), "rerank": (),
+    "chat": ("kernel_model_call", "volcengine_generate (legacy)"),
+    "ocr": ("kernel_model_call", "volcengine_ocr (legacy)"),
+    "vision": ("kernel_model_call",), "asr": ("kernel_model_call (OpenAI chat audio)",), "tts": (),
+    "embedding": ("kernel_model_call",), "rerank": ("kernel_model_call (DashScope)",),
 }
 
 # CNY. tokens: per 1M input / output tokens; audio: per minute; characters: per 10,000 characters.

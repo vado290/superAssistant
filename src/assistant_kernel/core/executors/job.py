@@ -74,7 +74,7 @@ async def run_script(vault: Path, job: dict[str, Any], env_extra: dict[str, str]
             "summary": tail.splitlines()[-1][:300] if tail else "done"}
 
 
-def load_product_agent(settings, project_id: str, name: str, project_kind: str = "business") -> AgentConfig:
+def load_product_agent(settings, project_id: str, name: str, project_kind: str = "business", model_purpose: str | None = None) -> AgentConfig:
     loader = AgentLoader(settings)
     config, files = loader.load(project_id, f"project:{project_id}:{name}")
     vault = loader.runtime.ensure(project_id).vault_root
@@ -84,7 +84,10 @@ def load_product_agent(settings, project_id: str, name: str, project_kind: str =
     selection = skill_rules.select(vault, settings.data_root, role=name, purpose="job", capabilities=capabilities,
                                    project_kind=project_kind)
     from assistant_kernel.core import models   # model settings: config/models.yaml (0.46.1)
-    config, _ = models.resolve(settings, name, config)
+    if model_purpose:
+        from assistant_kernel.core.model_gateway import resolve
+        resolve(settings, project_id, model_purpose, "agent")
+    config, _ = models.resolve(settings, name, config, project_id=project_id, purpose=model_purpose or "job")
     return AgentConfig(**{**config.__dict__, "skills_text": selection.render(vault), "skill_labels": tuple(selection.labels),
                           "config_sha256": skill_rules.digest(files + selection.files)})
 
@@ -93,21 +96,20 @@ async def run_agent(run: dict[str, Any], ctx, vault: Path, job: dict[str, Any], 
     settings = ctx.services["settings"]
     name = job["entry"].split("/", 1)[1]
     config = await asyncio.to_thread(load_product_agent, settings, run["project_id"], name,
-                                     await ctx.kernel.project_kind(run["project_id"]))
+                                     await ctx.kernel.project_kind(run["project_id"]), job.get("model_purpose"))
     project_charter = await asyncio.to_thread(charter, settings, run["project_id"])
     planned = datetime.fromisoformat(run["input"]["planned_at"]).astimezone(ZoneInfo(job["timezone"]))
-    prompt = "\n\n".join([
-        f"# Project {run['project_id']} · scheduled job {job['id']} (agent {name})",
+    stable_sections = [f"# Project {run['project_id']} · scheduled job {job['id']} (agent {name})",
+                       "## Your role\n\n" + config.role_text,
+                       *([config.skills_text] if config.skills_text else []),
+                       "## Output\n\nYou can only read, not change project files. When done, your last message is the result written "
+                       "for the user (concise, conclusion first) — no JSON."]
+    stable = "\n\n".join(stable_sections)
+    prompt = "\n\n".join([stable,
         *(["## Project charter\n\n" + project_charter] if project_charter else []),
-        "## Your role\n\n" + config.role_text,
-        *([config.skills_text] if config.skills_text else []),
-        f"## This run's task (planned for {planned:%Y-%m-%d %H:%M}, {job['timezone']})\n\n{job['prompt']}",
-        "## Output\n\nYou can only read, not change project files. When done, your last message is the result written "
-        "for the user (concise, conclusion first) — no JSON.",
-    ])
+        f"## This run's task (planned for {planned:%Y-%m-%d %H:%M}, {job['timezone']})\n\n{job['prompt']}"])
     result = await call_model(ctx, run, config, prompt, task_id=None, stage=None, session_id=None,
-                              tools=READ_ONLY_TOOLS, sandbox="read-only",
-                              stable_prefix="\n\n".join(prompt.split("\n\n")[:4]))
+                              tools=READ_ONLY_TOOLS, sandbox="read-only", stable_prefix=stable)
     text = (result.final_text or "").strip()
     log.write_text(text, "utf-8")
     if not text:

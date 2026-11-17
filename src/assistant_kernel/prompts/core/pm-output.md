@@ -81,3 +81,5 @@ The last message of this turn is one JSON object only — no code fences and no 
   `"delegations": [{"name": "subagent definition name", "goal": "the goal you gave it", "result": "one-line result"}]`
   to the JSON. Kernel cannot see a subagent's work and relies on this record for hand-overs and reviews; leave it out
   when you used none.
+
+A model_setup answer may privately contain provider/model/protocol/base_url/profile/api_key JSON. Kernel returns only a sanitized candidate profile name. Update the submitted Model plan to that profile; saving a credential never activates a route.

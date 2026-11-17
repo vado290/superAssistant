@@ -57,38 +57,32 @@ class CatalogChatProvider:
         return base.rstrip("/")
 
     @staticmethod
-    def normalize_usage(raw: dict[str, Any] | None) -> dict[str, Any]:
-        """Normalize common OpenAI, Anthropic and Gemini usage spellings without dropping raw fields."""
+    def normalize_usage(raw: dict[str, Any] | None, protocol: str = "auto") -> dict[str, Any]:
+        """Preserve unknowns and raw evidence; Anthropic input excludes cache reads/writes."""
         raw = dict(raw or {})
         details = raw.get("prompt_tokens_details") or raw.get("input_tokens_details") or {}
-        cached = (
-            raw.get("cached_input_tokens")
-            or raw.get("cache_read_input_tokens")
-            or raw.get("cachedContentTokenCount")
-            or details.get("cached_tokens")
-            or 0
-        )
-        cache_write = raw.get("cache_creation_input_tokens") or raw.get("cache_write_input_tokens") or 0
-        input_tokens = raw.get("input_tokens") or raw.get("prompt_tokens") or raw.get("promptTokenCount") or 0
-        output_tokens = raw.get("output_tokens") or raw.get("completion_tokens") or raw.get("candidatesTokenCount") or 0
-        normalized = dict(raw)
-        normalized.update({
-            "input_tokens": int(input_tokens),
-            "cached_input_tokens": int(cached),
-            "cache_creation_input_tokens": int(cache_write),
-            "output_tokens": int(output_tokens),
-            "cache_hit": bool(cached),
-            "cache_hit_ratio": round(int(cached) / int(input_tokens), 4) if int(input_tokens) else None,
-            "usage_source": "provider_response",
-        })
-        return normalized
+        def count(*values):
+            return next((int(v) for v in values if isinstance(v, (int, float)) and v >= 0), None)
+        cached = count(raw.get("cached_input_tokens"), raw.get("cache_read_input_tokens"),
+                       raw.get("cachedContentTokenCount"), details.get("cached_tokens"))
+        written = count(raw.get("cache_creation_input_tokens"), raw.get("cache_write_input_tokens"))
+        inputs = count(raw.get("input_tokens"), raw.get("prompt_tokens"), raw.get("promptTokenCount"))
+        outputs = count(raw.get("output_tokens"), raw.get("completion_tokens"), raw.get("candidatesTokenCount"))
+        anthropic = protocol == "anthropic" or (protocol == "auto" and "cache_read_input_tokens" in raw)
+        if anthropic:
+            inputs = inputs + cached + written if all(v is not None for v in (inputs, cached, written)) else None
+        ratio = round(cached / inputs, 4) if inputs and cached is not None and cached <= inputs else None
+        return {**raw, "raw_usage": raw, "input_tokens": inputs, "cached_input_tokens": cached,
+                "cache_creation_input_tokens": written, "output_tokens": outputs,
+                "cache_hit": cached > 0 if cached is not None else None, "cache_hit_ratio": ratio,
+                "usage_known": inputs is not None and outputs is not None,
+                "cache_usage_known": cached is not None, "usage_source": "provider_response",
+                "usage_scope": "invocation"}
 
     @staticmethod
     def _cache_protocol(policy: PromptCachePolicy | None, provider_type: str, model_config: dict) -> str:
         if not policy or not policy.enabled or policy.protocol == "none":
             return "none"
-        if policy.protocol != "auto":
-            return policy.protocol
         if provider_type == "anthropic_native":
             return "anthropic"
         if provider_type == "openai_responses" or str(model_config.get("api_style") or "") == "responses":
@@ -192,7 +186,7 @@ class CatalogChatProvider:
             raw = response.json()
         text = "".join(str(block.get("text", "")) for block in raw.get("content", []) if block.get("type") == "text")
         return ChatResult(provider=self.provider_name, model=model, text=text,
-                          usage=self.normalize_usage(raw.get("usage") or {}),
+                          usage=self.normalize_usage(raw.get("usage") or {}, protocol="anthropic"),
                           request_id=response.headers.get("request-id", ""))
 
     async def _gemini(self, prompt: str, model: str, system: str, max_tokens: int, temperature: float | None) -> ChatResult:

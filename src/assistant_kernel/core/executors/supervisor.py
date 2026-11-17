@@ -203,7 +203,18 @@ async def execute_supervisor(run: dict[str, Any], ctx) -> dict[str, Any]:
     if config.skills_text:
         stable_sections.append(config.skills_text)
     stable_sections.append(prompt_text(PURPOSE_PROMPT[purpose]))
-    sections = list(stable_sections)
+    fixed = [stable_sections[0], "## Your role in this project\n\n" + config.role_text]
+    if config.skills_text:
+        fixed.append(config.skills_text)
+    fixed.append(prompt_text(PURPOSE_PROMPT[purpose]))
+    if "project_management" in caps and purpose == "evaluate":
+        fixed.append(prompt_text("supervisor-kernel"))
+    if "shared_context" in caps and purpose == "consult" and project_kind == "kernel":
+        fixed.append(prompt_text("supervisor-shared"))
+    if "routing" in caps and purpose == "consult":
+        fixed.append(prompt_text("routing"))
+    sections = fixed + [part for part in stable_sections[1:] if part not in fixed]
+    stable_sections = fixed
     # Mutable facts are deliberately appended after the stable role/skill contract.
     sections.append(await situation_line(kernel, run_input, task))
     sections.append(await project_situation(kernel, settings, project_id, task))
@@ -239,6 +250,9 @@ async def execute_supervisor(run: dict[str, Any], ctx) -> dict[str, Any]:
                         + "\n```")
     else:
         message = await kernel.get_message(run_input["message_id"])
+        if run_input.get("model_setup_result"):
+            sections.append("## Model setup result (sanitized by Kernel; re-read catalog and continue the proposal)\n\n"
+                            + json.dumps(run_input["model_setup_result"], ensure_ascii=False))
         source = message["body"].get("handoff_from")
         title = f"Request handed over from project {source} (handoff note)" if source else \
             "What the user said in the Supervisor channel"
@@ -250,11 +264,8 @@ async def execute_supervisor(run: dict[str, Any], ctx) -> dict[str, Any]:
         if task and task["kind"] == "bootstrap":   # a new project must not duplicate an existing one
             catalog = await project_catalog_for_run(kernel, settings, run)
             sections.append(CATALOG_HEADING + catalog)
-        sections.append(prompt_text("supervisor-kernel"))
-    if "shared_context" in caps and purpose == "consult" and await kernel.project_kind(project_id) == "kernel":
-        sections.append(prompt_text("supervisor-shared"))
-    if "routing" in caps and purpose == "consult":
-        sections.append(prompt_text("routing"))
+
+
     from assistant_kernel.core.images import select_images
     images, image_note, _ = select_images(await kernel.image_inputs(run))
     parsed, model_result = await call_for_json(
@@ -262,7 +273,8 @@ async def execute_supervisor(run: dict[str, Any], ctx) -> dict[str, Any]:
         session_id=None, tools=READ_ONLY_TOOLS, sandbox="read-only", images=images,
         stable_prefix="\n\n".join(stable_sections))
     if parsed is None:
-        return {"decision": "invalid_output", "raw": model_result.final_text[:2000]}
+        return {"decision": "invalid_output", "raw": model_result.final_text[:2000],
+                "model_metadata": model_result.metadata}
     update = parsed.get("propose_shared_update")
     if isinstance(update, dict) and "shared_context" in caps:
         # Show the user what the section says now next to the proposal.

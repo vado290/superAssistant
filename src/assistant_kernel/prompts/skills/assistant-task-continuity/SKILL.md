@@ -2,9 +2,10 @@
 name: assistant-task-continuity
 description: The fixed sections and numbering rules of every artifact (charter, requirements, industry brief, design, implementation report, review report, improvement proposal); the PM writes and the Supervisor reads artifacts by them.
 metadata:
-  version: "2.17.0"
+  version: "2.18.0"
   load: {roles: [pm, supervisor]}
   changelog:
+    - "2.18.0 2026-11-17 Align model routing and stable-prefix method with actual runtime boundaries"
     - "2.17.0 2026-11-16 Design section 3 and the quick track's brief solution carry the Model plan when a step calls a model; section 9 names each agent job's profile (assistant-model-routing)"
     - "2.16.0 2026-11-16 Clarified bounded operational work, optional reviews and the distinction between maintenance recovery and review scheduling"
     - "2.15.0 2026-10-23 Written in English, the skills' source language; artifacts are written in the user's language, and headings Kernel parses come from the output requirements (ROUND6, 0.46.0)"
@@ -298,3 +299,9 @@ working_notes, with no separate hand-over ledger.
 - Writing conclusions only in the summary: the summary is a brief for the user; the next agent reads the artifacts.
 - Renumbering after changing requirements: it breaks every reference in the design and review.
 - Writing inferences as facts: mark them `[inferred]`.
+
+## Model selection and prompt reuse
+In full design and the quick brief solution, use assistant-model-routing for model-backed products. A plan profile
+must reach the actual agent/script call. Preserve purpose bindings through release and cite the effective route receipt.
+Keep stable prompt rules ahead of task data and preserve incremental sessions. Do not claim callable or verified from a
+saved key alone, or treat unknown token usage as zero.

@@ -41,7 +41,10 @@ model_plan:
 
 @pytest.fixture
 def settings(tmp_path):
-    return SimpleNamespace(provider_secrets_path=tmp_path / "config" / "provider-secrets.json",
+    auth = tmp_path / "vaults" / "p" / "runtime" / "codex-home" / "auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text("{}")
+    return SimpleNamespace(data_root=tmp_path, provider_secrets_path=tmp_path / "config" / "provider-secrets.json",
                            shared_volcengine_path=tmp_path / "shared-models" / "volcengine.json")
 
 

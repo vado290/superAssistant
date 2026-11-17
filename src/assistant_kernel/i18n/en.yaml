@@ -396,3 +396,12 @@ access.request_details: 'Targets: {targets}
 access.not_approved: 'Access was not approved: request is {status}. Submit a new request if still needed.'
 
 kernel.cos_review_goal: Review the user's goals, priorities and next steps
+
+# Model route changes (existing consultation cards).
+mx.model_change_q: "Change {purpose} from {before} to {profile}? Applies to the next call."
+mx.model_change_error: "Model change was not applied: {error}"
+mx.model_change_title: "Model change: {purpose}"
+mx.model_change_done: "Model route updated: {purpose} → {profile}; configuration {version}. Applies to the next call."
+
+decision.model_change: "Change model"
+mx.model_setup_q: "Configure the selected provider. Credentials are stored separately; current model routes stay unchanged."

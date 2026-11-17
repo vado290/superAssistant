@@ -54,9 +54,11 @@ async def test_an_agent_works_in_its_own_folder(kernel, kernel_settings, project
     class Harness:
         async def run_turn(self, request):
             seen["cwd"] = request.cwd
-            return SimpleNamespace(final_text="{}")
+            from assistant_kernel.harness.base import AgentTurnResult
+            from assistant_kernel.harness.context_budget import TurnUsage
+            return AgentTurnResult('test-session', TurnUsage(input_tokens=0), [], '{}')
 
-    config = SimpleNamespace(agent_id="supervisor", allowed_tools=(), model=None, reasoning_effort=None, provider=None,
+    config = SimpleNamespace(agent_id="supervisor", profile=None, route_version=None, route_source=None, allowed_tools=(), model=None, reasoning_effort=None, provider=None,
                              context_policy=None, model_context_window_tokens=None, model_auto_compact_token_limit=None,
                              timeout_seconds=60)
     ctx = SimpleNamespace(kernel=kernel, services={"settings": kernel_settings, "harness": Harness()}, cancel=asyncio.Event())

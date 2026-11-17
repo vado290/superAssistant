@@ -18,3 +18,5 @@ One JSON object only — no code fences and no other text; reply and the proposa
 {"decision": "chat | supplement | new_work", "reply": "what you say to the user (required for chat)", "propose_new_task": {"goal": "the new work in one sentence (new_work only)", "message": "the card text"}}
 
 Unused fields may be left out.
+
+For a request to change the model of an existing product capability, return decision="consult" with a short reply. Kernel forwards it to a separate Supervisor consultation without changing the active task. Adding product behavior still follows the task flow.

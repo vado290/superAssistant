@@ -106,3 +106,20 @@ projects) comes from `i18n/en.yaml`, never from literals in code. Contracts, ski
 model turn ends with a language note: models reply in the language the user writes in (the latest message, otherwise the
 language the user mostly writes in, otherwise English), and the text of documents follows it, while document headings stay
 in English — the parser also accepts the Chinese headings of older documents.
+
+## Model routing and prompt usage
+Models v1 remains readable; v2 adds role/stage routes, provider protocol records and project purpose bindings.
+Agent explicit fields remain exceptions. Plans, catalog and execution share models.route. Product calls use
+model_gateway through released purposes; Codex remains the agent harness. Ordinary API providers need no CLI.
+Release approval freezes the plan profiles; successful publication activates bindings idempotently before closing.
+Operation uses an independent consultation model-change card for existing project purposes. Global policy and
+embedding migrations remain tasks. No automatic vendor fallback or speculative installation is included.
+Fixed role/output rules precede mutable context. The language reminder stays at the end for compatibility and is
+also in the fresh-session fixed prefix. PM resumed deltas are preserved. Context occupancy, invocation usage and
+session totals have separate metadata; repair calls preserve individual receipts. Unknown usage remains unknown.
+Adapter/configuration readiness is not a real capability test or measured cache saving. Non-Agent release gates require
+a successful gateway receipt bound to model, endpoint and credential revision; review still evaluates output quality.
+Operation switches require the same existing capability evidence; unverified targets use the product build preflight.
+Setup reuses existing credentials, and a different account/endpoint uses a new provider instance. Explicit routing
+endpoints precede stored regional endpoints, which precede catalog defaults. Product chat supplies stable system rules
+to protocol-aware cache policies; dynamic input is excluded from cache keys. Provider-reported usage determines hits.

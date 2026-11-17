@@ -2,9 +2,10 @@
 name: assistant-triage-routing
 description: Triage and routing — decide whether a user message is a query, bounded maintenance work, formal project work, or an incident, and accordingly answer directly, continue or start a task, or hand it over.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   load: {roles: [pm, supervisor], purposes: [triage, consult]}
   changelog:
+    - "1.4.0 2026-11-17 Align model routing and stable-prefix method with actual runtime boundaries"
     - "1.3.0 2026-11-17 Separate catalog visibility from routing authority; project creation follows project_management, including Chief of Staff"
     - "1.2.0 2026-11-16 Added bounded maintenance and incident routing; queries stay lightweight and ongoing work keeps an explicit end state"
     - "1.1.0 2026-10-23 Written in English, the skills' source language; what the user reads follows the user's language (ROUND6, 0.46.0)"
@@ -53,3 +54,8 @@ The other project sees only the handoff note, so make it readable on its own (in
 - Treating "hello", "are you there", "which skills are there now" as tasks.
 - Creating a new task when the user only asked about a project's progress: answer it, or hand it to that project.
 - Handing over for its own sake: never push to another project what this project can do.
+
+## Model selection and prompt reuse
+A request to change the model of an existing product purpose may return decision=consult under the triage contract.
+It opens a separate Supervisor consultation without attaching the request to the current task. New product behavior
+remains task work. For busy states without triage, direct the user to the Supervisor or /models <request>.

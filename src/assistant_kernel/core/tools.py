@@ -406,6 +406,31 @@ def build_server(scope: Scope) -> MCPServer:
             raise FileNotFoundError(f"no credential {key}; list the existing keys with list_credentials")
         return item
 
+    @tool(MODEL_CALL)
+    async def kernel_model_preflight(purpose: str, inputs: dict) -> dict:
+        """Build-only real call using this task's approved plan; never activates production bindings."""
+        from assistant_kernel.core import model_plan, rules
+        from assistant_kernel.core.model_gateway import call
+        if scope.stage != "build":
+            raise PermissionError("candidate model preflight is only available during build")
+        async with Database(settings).tx() as c:
+            task = await one(c, "SELECT * FROM core.tasks WHERE task_id::text=%s AND project_id=%s",
+                             (scope.task_id, project_id))
+        approval = "requirements" if task and task.get("track") == "quick" else "design"
+        if not task or not rules.approval_valid(task, approval):
+            raise PermissionError("model preflight requires the approved design or brief solution")
+        document = task["documents"].get(model_plan.plan_document(task)) or {}
+        row = next((r for r in document.get("model_plan") or [] if r["purpose"] == purpose), None)
+        if not row:
+            raise ValueError("purpose is not in this task's approved Model plan")
+        return await call(settings, project_id, purpose, row["capability"], inputs, profile=row["profile"])
+
+    @tool(MODEL_CALL)
+    async def kernel_model_call(purpose: str, capability: str, inputs: dict) -> dict:
+        """Call a released model purpose; no keys or arbitrary provider selection accepted."""
+        from assistant_kernel.core.model_gateway import call
+        return await call(settings, project_id, purpose, capability, inputs)
+
     @tool(READ_ONLY)
     async def kernel_model_catalog() -> dict:
         """Model capabilities with their default profile and what can call them today (available_via), profiles with
@@ -418,12 +443,14 @@ def build_server(scope: Scope) -> MCPServer:
                 task = await one(c, """SELECT kind, track, stage, documents FROM core.tasks
                                        WHERE task_id::text=%s AND project_id=%s""", (scope.task_id, project_id))
         view = model_plan.catalog_view(settings, task)
+        from assistant_kernel.core import models
+        view["project_purposes"] = ((models.load(settings).get("projects") or {}).get(project_id) or {}).get("purposes", {})
         stage_kind = {"requirements": "task_contract", "design": "solution_design"}.get(scope.stage or "")
         if task and stage_kind and stage_kind in drafts.editable(scope.stage):
             draft = drafts.load(settings, project_id, scope.task_id, stage_kind)
             if draft and draft.get("markdown"):
                 try:
-                    rows = model_plan.parse(draft["markdown"])
+                    rows = model_plan.parse(draft["markdown"], settings)
                     view["draft_plan"] = None if rows is None else {"rows": rows, "estimate": model_plan.estimate(rows)}
                 except ValueError as exc:
                     view["draft_plan"] = {"error": str(exc)}

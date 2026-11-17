@@ -256,9 +256,11 @@ async def test_m6_a_login_refreshed_mid_call_is_shared_before_the_call_ends(kern
             local.write_text('{"t": "refreshed"}')                    # Codex refreshes at the start of the turn
             await asyncio.sleep(0.3)
             seen["master"] = master.read_text()                        # ... while the turn is still running
-            return SimpleNamespace(final_text="{}")
+            from assistant_kernel.harness.base import AgentTurnResult
+            from assistant_kernel.harness.context_budget import TurnUsage
+            return AgentTurnResult('test-session', TurnUsage(input_tokens=0), [], '{}')
 
-    config = SimpleNamespace(agent_id="pm", allowed_tools=(), model=None, reasoning_effort=None, provider=None, context_policy=None,
+    config = SimpleNamespace(agent_id="pm", profile=None, route_version=None, route_source=None, allowed_tools=(), model=None, reasoning_effort=None, provider=None, context_policy=None,
                              model_context_window_tokens=None, model_auto_compact_token_limit=None, timeout_seconds=60)
     ctx = SimpleNamespace(kernel=kernel, services={"settings": kernel_settings, "harness": Harness()}, cancel=asyncio.Event())
     run = {"project_id": "p1", "run_id": "r1", "attempt": 1}

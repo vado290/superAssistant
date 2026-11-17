@@ -388,7 +388,7 @@ async def test_only_build_turns_may_write_outside_the_kernel(monkeypatch, kernel
 
     async def fake_call(ctx, run, config, prompt, **kwargs):
         seen.update(kwargs)
-        return None, SimpleNamespace(final_text="")
+        return None, SimpleNamespace(final_text="", metadata={})
 
     class StubKernel:
         async def get_task(self, task_id):

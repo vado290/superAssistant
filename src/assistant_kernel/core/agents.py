@@ -36,6 +36,8 @@ class AgentConfig:
     config_sha256: str
     skills_text: str = ""                  # rendered skills, on-demand index and shared context
     skill_labels: tuple[str, ...] = ()     # name@version of everything loaded, recorded on the run
+    route_version: str | None = None
+    route_source: str | None = None
     profile: str | None = None             # model profile from config/models.yaml (harness.profile), 0.46.1
 
 

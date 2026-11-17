@@ -27,3 +27,13 @@ One JSON object only — no code fences and no other text; everything the user r
 }
 
 reply is required; leave out propose_new_task, upgrade, propose_grant and profile_observations when not needed.
+
+For an existing released model purpose, you may include:
+"propose_model_change": {"scope": "project", "purpose": "existing-purpose", "profile": "catalog-profile", "reason": "expected measurable improvement"}.
+Read kernel_model_catalog first. Kernel validates the target and presents an independent approval card; do not claim it is active.
+Only this project's existing purposes may change. For missing credentials or a new provider instance, include model_setup_questions with the same question shape as PM model_setup; Kernel stores secret answers and resumes this consultation. New capabilities, embedding index changes, and global policy changes require the existing task flow.
+
+Optional setup example: "model_setup_questions": [{"id": "m1", "text": "Configure the selected provider", "model_setup": {"capability": "chat", "purpose": "existing-purpose", "recommended_vendor": "dashscope"}}].
+The private answer may be a key for the suggested vendor, or a JSON object with provider, model, protocol, base_url,
+profile and api_key. This creates a candidate profile only. After the sanitized answer returns, re-read the catalog and
+propose_model_change with that profile; never repeat the secret or claim setup itself changed the active route.

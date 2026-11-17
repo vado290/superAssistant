@@ -511,20 +511,22 @@ def test_cos_inherits_current_operation_templates_and_preserves_custom_copy(tmp_
     skills.install_templates(vault, frozenset())
     selected = skills.select(vault, tmp_path, role="pm", stage="evolution", task_kind="evolution")
     operation = next(s for s in selected.on_demand if s.name == "assistant-operation")
-    assert operation.version == "3.6.0" and "Chief of Staff scope" in operation.body
-    assert any(s.name == "assistant-evolution-review" and s.version == "2.5.0" for s in selected.always)
+    operation_version = skills.parse(templates / 'assistant-operation' / 'SKILL.md').version
+    evolution_version = skills.parse(templates / 'assistant-evolution-review' / 'SKILL.md').version
+    assert operation.version == operation_version and "Chief of Staff scope" in operation.body
+    assert any(s.name == "assistant-evolution-review" and s.version == evolution_version for s in selected.always)
     skills.sync_templates(vault, frozenset(), "same-version")
     before = skills.offered(vault)["template_fingerprint"]
     custom = skills.agent_skill_dir(vault, "pm") / "assistant-evolution-review" / "SKILL.md"
     custom.write_text(custom.read_text("utf-8")+"\nLocal customization\n", "utf-8")
     template = templates / "assistant-operation" / "SKILL.md"
-    template.write_text(template.read_text("utf-8").replace('3.6.0', '3.7.0'), "utf-8")
+    template.write_text(template.read_text("utf-8").replace(f'version: "{operation_version}"', 'version: "99.0.0"'), "utf-8")
     evolution = templates / "assistant-evolution-review" / "SKILL.md"
-    evolution.write_text(evolution.read_text("utf-8").replace('2.5.0', '2.6.0'), "utf-8")
+    evolution.write_text(evolution.read_text("utf-8").replace(f'version: "{evolution_version}"', 'version: "99.0.0"'), "utf-8")
     assert before != skills.template_fingerprint()
     result = skills.sync_templates(vault, frozenset(), "same-version")
     assert "assistant-operation" in result["refreshed"] and "assistant-evolution-review" in result["kept"]
-    assert skills.parse(operation.path).version == "3.7.0" and "Local customization" in custom.read_text("utf-8")
+    assert skills.parse(operation.path).version == "99.0.0" and "Local customization" in custom.read_text("utf-8")
 
 
 def test_template_rollout_preserves_changed_support_files(tmp_path, monkeypatch):

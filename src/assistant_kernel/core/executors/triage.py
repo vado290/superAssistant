@@ -33,13 +33,22 @@ async def execute_triage(run: dict[str, Any], ctx) -> dict[str, Any]:
     stable_sections.append("## Your role in this project\n\n" + config.role_text)
     if config.skills_text:
         stable_sections.append(config.skills_text)
-    sections = list(stable_sections)
+    context_id = run["input"].get("context_task_id")
+    task = await kernel.get_task(context_id) if context_id else None
+    fixed = [stable_sections[0], "## Your role in this project\n\n" + config.role_text]
+    if config.skills_text:
+        fixed.append(config.skills_text)
+    fixed.append(prompt_text("triage-busy" if task else "triage"))
+    if not task and "routing" in caps:
+        fixed.append(prompt_text("routing"))
+    if not task and "project_management" in caps:
+        fixed.append(prompt_text("triage-projects"))
+    sections = fixed + [part for part in stable_sections[1:] if part not in fixed]
+    stable_sections = fixed
     if caps & {"routing", "project_management"} or await kernel.project_kind(project_id) == "chief_of_staff":
         catalog = await project_catalog_for_run(kernel, settings, run)
         sections.append(CATALOG_HEADING + catalog)
     sections.append("## Recent conversation\n\n" + render_messages(await kernel.recent_messages(project_id)))
-    context_id = run["input"].get("context_task_id")
-    task = await kernel.get_task(context_id) if context_id else None
     if task:   # daily operations: the project is busy with this task (machine.user_input)
         sections.append(f"## The task the project is working on\n\n- Goal: {task['goal']}\n"
                         + (f"- Why it was started: {task['reason']}\n" if task.get("reason") else "")
@@ -47,22 +56,19 @@ async def execute_triage(run: dict[str, Any], ctx) -> dict[str, Any]:
                         f"- Ledger: `runs/{task['task_id']}/state.md` (read-only tools)")
         sections.append(f"## The user's new message in the PM channel (while that task is running)\n\n"
                         f"{message['body'].get('text', '')}")
-        sections.append(prompt_text("triage-busy"))
+
     else:
         sections.append(f"## The user's new message in the PM channel (the project has no active task)\n\n"
                         f"{message['body'].get('text', '')}")
-        sections.append(prompt_text("triage"))
-        if "routing" in caps:
-            sections.append(prompt_text("routing"))
-        if "project_management" in caps:
-            sections.append(prompt_text("triage-projects"))
+
     images, image_note, _ = select_images(await kernel.image_inputs(run))
     parsed, model_result = await call_for_json(
         ctx, run, config, "\n\n".join(sections) + image_note, task_id=None, stage=None, session_id=None,
         tools=READ_ONLY_TOOLS, sandbox="read-only", images=images,
         stable_prefix="\n\n".join(stable_sections))
     if parsed is None:
-        return {"decision": "invalid_output", "raw": model_result.final_text[:2000]}
+        return {"decision": "invalid_output", "raw": model_result.final_text[:2000],
+                "model_metadata": model_result.metadata}
     return {**parsed, "config_sha256": config.config_sha256, "skills": list(config.skill_labels),
             "usage": model_result.usage.model_dump(), "model_metadata": model_result.metadata,
             "_capabilities": sorted(caps), "_input_images": list(images)}
