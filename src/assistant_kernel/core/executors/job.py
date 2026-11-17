@@ -51,9 +51,22 @@ async def run_script(vault: Path, job: dict[str, Any], env_extra: dict[str, str]
         try:
             code = await asyncio.wait_for(process.wait(), timeout=job["timeout_seconds"])
         except asyncio.TimeoutError:
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # The session exited between wait cancellation and cleanup.
             await process.wait()
             raise JobFailed(f"stopped after the timeout ({job['timeout_seconds']} s); log {log.relative_to(vault)}")
+        except asyncio.CancelledError:
+            # Cancellation can come from lease loss. Stop the whole session before
+            # letting the dispatcher report the run, so an orphan cannot keep writing.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # Preserve cancellation when the session has already exited.
+            finally:
+                await process.wait()
+            raise
     tail = log.read_bytes()[-LOG_TAIL:].decode("utf-8", "replace").strip()
     if code != 0:
         raise JobFailed(f"exit code {code}; log {log.relative_to(vault)}; last output: {tail[-500:]}")
@@ -61,12 +74,15 @@ async def run_script(vault: Path, job: dict[str, Any], env_extra: dict[str, str]
             "summary": tail.splitlines()[-1][:300] if tail else "done"}
 
 
-def load_product_agent(settings, project_id: str, name: str) -> AgentConfig:
+def load_product_agent(settings, project_id: str, name: str, project_kind: str = "business") -> AgentConfig:
     loader = AgentLoader(settings)
     config, files = loader.load(project_id, f"project:{project_id}:{name}")
     vault = loader.runtime.ensure(project_id).vault_root
     capabilities = skill_rules.project_config(vault)["capabilities"]
-    selection = skill_rules.select(vault, settings.data_root, role=name, purpose="job", capabilities=capabilities)
+    if project_kind == "chief_of_staff":
+        capabilities = capabilities & {"project_management"}
+    selection = skill_rules.select(vault, settings.data_root, role=name, purpose="job", capabilities=capabilities,
+                                   project_kind=project_kind)
     from assistant_kernel.core import models   # model settings: config/models.yaml (0.46.1)
     config, _ = models.resolve(settings, name, config)
     return AgentConfig(**{**config.__dict__, "skills_text": selection.render(vault), "skill_labels": tuple(selection.labels),
@@ -76,7 +92,8 @@ def load_product_agent(settings, project_id: str, name: str) -> AgentConfig:
 async def run_agent(run: dict[str, Any], ctx, vault: Path, job: dict[str, Any], log: Path) -> dict[str, Any]:
     settings = ctx.services["settings"]
     name = job["entry"].split("/", 1)[1]
-    config = await asyncio.to_thread(load_product_agent, settings, run["project_id"], name)
+    config = await asyncio.to_thread(load_product_agent, settings, run["project_id"], name,
+                                     await ctx.kernel.project_kind(run["project_id"]))
     project_charter = await asyncio.to_thread(charter, settings, run["project_id"])
     planned = datetime.fromisoformat(run["input"]["planned_at"]).astimezone(ZoneInfo(job["timezone"]))
     prompt = "\n\n".join([
@@ -89,12 +106,14 @@ async def run_agent(run: dict[str, Any], ctx, vault: Path, job: dict[str, Any], 
         "for the user (concise, conclusion first) — no JSON.",
     ])
     result = await call_model(ctx, run, config, prompt, task_id=None, stage=None, session_id=None,
-                              tools=READ_ONLY_TOOLS, sandbox="read-only")
+                              tools=READ_ONLY_TOOLS, sandbox="read-only",
+                              stable_prefix="\n\n".join(prompt.split("\n\n")[:4]))
     text = (result.final_text or "").strip()
     log.write_text(text, "utf-8")
     if not text:
         raise JobFailed("the agent gave no result")
-    return {"summary": text, "log": str(log.relative_to(vault)), "usage": result.usage.model_dump()}
+    return {"summary": text, "log": str(log.relative_to(vault)), "usage": result.usage.model_dump(),
+            "model_metadata": result.metadata}
 
 
 async def execute_job(run: dict[str, Any], ctx) -> dict[str, Any]:

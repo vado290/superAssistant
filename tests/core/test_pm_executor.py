@@ -407,8 +407,11 @@ async def test_only_build_turns_may_write_outside_the_kernel(monkeypatch, kernel
         async def project_digest(self, project_id):
             return {}
 
+        async def project_kind(self, project_id):
+            return "business"
+
     monkeypatch.setattr(pm, "call_for_json", fake_call)
-    async def no_material(*args):
+    async def no_material(*args, **kwargs):
         return ""
     monkeypatch.setattr(pm, "evolution_material", no_material)
     ctx = SimpleNamespace(kernel=StubKernel(), services={"settings": kernel_settings})

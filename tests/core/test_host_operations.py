@@ -23,8 +23,10 @@ def devices(kernel_settings):
 
 async def make_run(settings, project="p1", status="running"):
     async with Database(settings).tx() as c:
-        row = await one(c, "INSERT INTO core.runs(project_id, run_type, status, claim_token) "
-                           "VALUES (%s,'supervisor',%s,%s) RETURNING run_id", (project, status, TOK))
+        # Like a real claim: a running run always holds an unexpired lease.
+        row = await one(c, "INSERT INTO core.runs(project_id, run_type, status, claim_token, lease_until) "
+                           "VALUES (%s,'supervisor',%s,%s, now() + interval '15 minutes') RETURNING run_id",
+                        (project, status, TOK))
     return str(row["run_id"])
 
 

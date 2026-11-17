@@ -2,12 +2,13 @@
 name: assistant-solution-design
 description: Design stage — from the approved requirements, design the complete solution from input to usable result, verify the key dependencies, and spell out the hand-over to the build and how it is accepted.
 metadata:
-  version: "2.5.0"
+  version: "2.6.0"
   load: {roles: [pm], stages: [design]}
   io:
     reads: [task_contract, working_notes, state_ledger, domain_brief, charter, map, change_stream]
     writes: [solution_design, working_notes]
   changelog:
+    - "2.6.0 2026-11-16 A model call is a key dependency: plan it in the Model plan of section 3 and ask for missing model setup in this stage (assistant-model-routing)"
     - "2.5.0 2026-11-05 Add bounded dependency recovery and distinguish current blockers from later prerequisites"
     - "2.4.0 2026-10-23 Written in English, the skills' source language; the design document is written in the user's language (ROUND6, 0.46.0)"
     - "2.3.1 2026-10-20 Added handling of reception problems, the meaning of defaults and open items, and checking this task's research first; kept the existing requirements and approval mechanism"
@@ -61,7 +62,9 @@ that applies to this task, clear up conflicts first, and never mix them or overr
    date, limits, and what happens when unavailable. Mark documentation claims, real samples and actual calls separately;
    reuse existing research only where it still applies, and re-check volatile key facts specifically. For further research
    read the design branch of assistant-domain-research; investigate only within the current grants, and when you cannot
-   verify, say it is unknown — never write it as available.
+   verify, say it is unknown — never write it as available. A model call is such a dependency: plan every one by
+   assistant-model-routing in the Model plan of section 3, and ask for missing model setup in this stage so the build
+   never waits for it.
 5. Decide by the design branch of assistant-subagent-orchestration whether to delegate investigations, inventories or
    counter-example reviews; check the key evidence and act on the findings. Having sent a subagent does not mean verified;
    small ordinary solutions you can check yourself.

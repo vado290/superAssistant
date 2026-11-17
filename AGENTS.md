@@ -27,6 +27,13 @@ This repository is the Kernel of the personal super assistant: the control core 
 - Keep changes small and on the main path. No machinery for rare cases; the user prefers patches later over
   heavy code now.
 
+## Chief of Staff
+- CoS is a database-owned project kind reusing PM/Supervisor, task cursors and Discord bootstrap.
+- Code holds only hard boundaries (identity, Project Access, no target writes); the working method lives in the
+  `assistant-chief-of-staff` skill (installed only where `load.project_kinds` matches the database kind).
+- Routing directory = public registration (name, purpose, charter routing section); portfolio content = Project Access.
+- See `docs/CHIEF_OF_STAFF_PLAN.md`. No automatic CoS reviews or shared-background migration yet.
+
 ## Layout (short)
 - `src/assistant_kernel/core/` — the control core (see ARCHITECTURE.md for each module)
 - `src/assistant_kernel/harness/` — Codex CLI harness (one model turn per call)

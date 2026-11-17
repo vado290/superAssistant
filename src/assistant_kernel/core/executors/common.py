@@ -8,10 +8,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import yaml
 
 from assistant_kernel.harness.base import AgentTurnRequest, AgentTurnResult
-from assistant_kernel.core import drafts, i18n, rules, skills as skill_rules
+from assistant_kernel.core import drafts, i18n, prompt_cache, rules, skills as skill_rules
 from assistant_kernel.core.agents import AgentConfig, AgentLoader
 from assistant_kernel.services.document_runtime import TaskDocumentService
 from assistant_kernel.storage import ProjectRuntimeManager
@@ -28,16 +27,19 @@ MVP_TOOLS = frozenset({
     "volcengine_model_status", "volcengine_generate", "volcengine_ocr",
     "read_task_document", "edit_task_document", "list_iterations", "map_lookup", "list_credentials",
     "get_credential", "list_skill_updates", "host_capabilities", "host_submit", "host_status",
+    "kernel_model_catalog",
 })
+PROJECT_ACCESS_TOOLS = frozenset({"read_portfolio_snapshot", "list_workspace_projects", "list_accessible_projects",
+    "read_project_catalog", "read_project_summary", "list_project_tasks", "list_project_history", "list_project_documents", "read_cross_project_document", "request_project_access"})
 CANDIDATE_TOOLS = frozenset({"write_candidate_file", "delete_candidate_file"})
 # Kernel's own document protocol for PM turns: granted whenever offered, a project's tool list does not narrow it.
 DOCUMENT_TOOLS = frozenset({"read_task_document", "edit_task_document"})
 # Platform tools every model turn gets (among those its executor offers) whatever the project's own tool list says:
 # the initialising tool (every other tool needs it called first), recent conversation, the change stream (ROUND4),
 # the map and the credentials (ROUND5). An empty tool list (Supervisor) therefore means "platform tools only".
-PLATFORM_TOOLS = DOCUMENT_TOOLS | {"get_authorized_workspace", "list_recent_history", "list_iterations", "map_lookup",
+PLATFORM_TOOLS = DOCUMENT_TOOLS | PROJECT_ACCESS_TOOLS | {"get_authorized_workspace", "list_recent_history", "list_iterations", "map_lookup",
                                    "list_credentials", "get_credential", "list_skill_updates",
-                                   "host_capabilities", "host_submit", "host_status"}
+                                   "host_capabilities", "host_submit", "host_status", "kernel_model_catalog"}
 READ_ONLY_TOOLS = MVP_TOOLS - CANDIDATE_TOOLS - DOCUMENT_TOOLS - {"volcengine_generate", "volcengine_ocr"}
 
 
@@ -63,7 +65,8 @@ def path_note(vault: Path, agent: str) -> str:
 
 
 def load_agent(settings, project_id: str, role: str, *, stage: str | None = None, purpose: str | None = None,
-               task_kind: str | None = None, native: bool = True) -> AgentConfig:
+               task_kind: str | None = None, native: bool = True,
+               project_kind: str = "business") -> AgentConfig:
     """The project's live agent files plus the skills and shared context its load rules select for this run.
     `native`: the run works in the agent's own folder (False only for a code-delivery worktree)."""
     loader = AgentLoader(settings)
@@ -71,8 +74,10 @@ def load_agent(settings, project_id: str, role: str, *, stage: str | None = None
     config, files = loader.load(project_id, f"project:{project_id}:{agent}")
     vault = loader.runtime.ensure(project_id).vault_root
     capabilities = skill_rules.project_config(vault)["capabilities"]
+    if project_kind == "chief_of_staff":
+        capabilities = capabilities & {"project_management"}
     selection = skill_rules.select(vault, settings.data_root, role=role, stage=stage, purpose=purpose,
-                                   capabilities=capabilities, task_kind=task_kind)
+                                   capabilities=capabilities, task_kind=task_kind, project_kind=project_kind)
     skills_text = selection.render(vault, native=native)
     if native:
         skills_text = "\n\n".join(part for part in (path_note(vault, config.agent_id), skills_text) if part)
@@ -156,25 +161,39 @@ def charter(settings, project_id: str) -> str:
     return text
 
 
-CATALOG_SECTIONS = ("purpose", "scope", "routing")   # charter heading keys
+CATALOG_LIMIT = 600   # characters per registration field; the directory is for routing, not for reading projects
 
 
-def project_catalog(settings, project_ids: list[str], *, exclude: str) -> str:
-    """Routing view of the other projects (R2.2): purpose, scope and routing info from each charter."""
-    runtime = ProjectRuntimeManager(settings.data_root)
+def project_catalog(settings, projects: list[dict[str, Any]]) -> str:
+    """Public routing directory: registered name, purpose and the charter's routing section (aliases, typical
+    requests). It never reads business documents, background or profiles, and never creates a vault."""
     parts = []
-    for project_id in project_ids:
-        if project_id == exclude:
-            continue
-        vault = runtime.ensure(project_id).vault_root
-        text = charter(settings, project_id)
-        sections = [f"**{i18n.heading(key)}**\n{skill_rules.section_text(text, key)}" for key in CATALOG_SECTIONS
-                    if skill_rules.section_text(text, key)]
-        if not sections:   # no charter yet: name and purpose from project.yaml
-            config = yaml.safe_load((vault / "project.yaml").read_text("utf-8")) if (vault / "project.yaml").is_file() else {}
-            sections = [f"**{i18n.heading('purpose')}**\n{(config or {}).get('purpose') or '(not given)'}"]
-        parts.append(f"### Project `{project_id}`\n\n" + "\n\n".join(sections))
+    for row in projects:
+        project_id, registered = row["project_id"], row.get("settings") or {}
+        path = settings.data_root / "vaults" / project_id / "knowledge" / "charter.md"
+        text = path.read_text("utf-8") if path.is_file() else ""
+        purpose = registered.get("purpose") or skill_rules.section_text(text, "purpose") or "(not given)"
+        lines = [f"### Project `{project_id}` · {registered.get('display_name') or project_id}"
+                 + (" (Chief of Staff)" if row.get("kind") == "chief_of_staff" else ""),
+                 f"**{i18n.heading('purpose')}**\n{purpose[:CATALOG_LIMIT]}"]
+        routing = skill_rules.section_text(text, "routing")
+        if routing:
+            lines.append(f"**{i18n.heading('routing')}**\n{routing[:CATALOG_LIMIT]}")
+        parts.append("\n\n".join(lines))
     return "\n\n".join(parts) or "(no other projects)"
+
+
+async def project_catalog_for_run(kernel, settings, run: dict[str, Any]) -> str:
+    """Routing projects get the public directory; Chief of Staff reads portfolio content only through Project Access."""
+    if await kernel.project_kind(run["project_id"]) != "chief_of_staff":
+        return await asyncio.to_thread(project_catalog, settings, await kernel.routing_projects(run["project_id"]))
+    if not settings.project_access_enabled:
+        return "(Project Access is disabled; no cross-project content was read. Portfolio coverage is unknown.)"
+    from assistant_kernel.core.project_access import ProjectAccessService
+    page = await ProjectAccessService(settings).portfolio_snapshot(
+        run["project_id"], run_id=run["run_id"], claim_token=run["claim_token"])
+    return ("Authorized portfolio page (continue with read_portfolio_snapshot; missing coverage is unknown):\n"
+            + json.dumps(page, ensure_ascii=False))
 
 
 DOCUMENT_TITLES = {"task_contract": "Requirements document", "solution_design": "Design document",
@@ -201,6 +220,12 @@ def document_sections(settings, task: dict[str, Any]) -> list[tuple[str, str, st
                 body += "\n\n> Kernel check: the iteration record is valid and is stored when the release is approved."
             if document.get("effect_review_error"):
                 body += "\n\n> Kernel check: the effect review did not pass and needs fixing: " + document["effect_review_error"]
+            if document.get("model_plan_error"):
+                body += ("\n\n> Kernel check: the Model plan cannot be read and blocks build and release; please fix it: "
+                         + document["model_plan_error"])
+            elif document.get("model_plan"):
+                body += (f"\n\n> Kernel check: the Model plan has {len(document['model_plan'])} row(s); whether their "
+                         "vendors are configured is checked live (kernel_model_catalog).")
             sections.append((kind, document["sha256"], f"### {title} (sha {document['sha256'][:12]})\n\n{body}"))
     validation = task["documents"].get("validation")
     if validation:   # written by Kernel, it has no revision sha of its own
@@ -251,15 +276,20 @@ def workspace_snapshot(settings, project_id: str, task_id: str, variant: str, *,
 async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str, *,
                      task_id: str | None, stage: str | None, session_id: str | None,
                      tools: frozenset[str], sandbox: str, candidates: bool = False,
-                      subagents: int = 0, cwd: Path | None = None, images: tuple[dict, ...] = ()) -> AgentTurnResult:
+                      subagents: int = 0, cwd: Path | None = None, images: tuple[dict, ...] = (),
+                      stable_prefix: str | None = None) -> AgentTurnResult:
     """One Codex invocation with the project's model settings and the scoped Kernel tools."""
     settings, harness = ctx.services["settings"], ctx.services["harness"]
     project_id = run["project_id"]
+    if await ctx.kernel.project_kind(project_id) == "chief_of_staff":
+        prompt += "\n\n" + prompt_text("chief-of-staff")
     image_paths = ()
     if images:
         from assistant_kernel.core.images import validate_refs
         image_paths = await asyncio.to_thread(validate_refs, settings, project_id, images)
     invocation_id = f"{run['run_id']}-a{run['attempt']}-{uuid.uuid4().hex[:8]}"
+    if settings.project_access_enabled:
+        tools = tools | PROJECT_ACCESS_TOOLS
     allowed = effective_tools(tools, config.allowed_tools)
     model, effort, window, compact = config.model, config.reasoning_effort, None, None
     if hasattr(harness, "resolve_model_profile"):
@@ -282,6 +312,7 @@ async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str,
             "KERNEL_SCOPE_WORKER_INSTANCE_ID": str(run["worker_id"]), "KERNEL_SCOPE_CORE": "1",
             "KERNEL_SCOPE_ALLOWED_TOOLS": ",".join(allowed), "KERNEL_SCOPE_STAGE": stage or "",
             "KERNEL_SCOPE_SNAPSHOT_URI": scope_uri, "KERNEL_SCOPE_SNAPSHOT_SHA256": scope_sha,
+            "ASSISTANT_PROJECT_ACCESS_ENABLED": "1" if settings.project_access_enabled else "0",
             "KERNEL_SCOPE_EFFECTIVE_PERMISSIONS_JSON": "{}", "KERNEL_SCOPE_CONTEXT_VIEW_JSON": "{}",
         }
     from assistant_kernel.core.executors.auth_sync import sync
@@ -298,14 +329,23 @@ async def call_model(ctx, run: dict[str, Any], config: AgentConfig, prompt: str,
 
     sharing = asyncio.create_task(share_refreshed_login())
     try:
+        final_prompt = f"{prompt}\n\n{i18n.LANGUAGE_NOTE}"  # replies in the user's language (ROUND6)
+        cache_meta = prompt_cache.from_prompt(
+            final_prompt,
+            stable_prefix=stable_prefix,
+            provider=config.provider or settings.default_codex_provider,
+            model=model,
+            session_reused=bool(session_id),
+        )
         return await harness.run_turn(AgentTurnRequest(
-            project_id=project_id, prompt=f"{prompt}\n\n{i18n.LANGUAGE_NOTE}",   # replies in the user's language (ROUND6)
+            project_id=project_id, prompt=final_prompt,
             cwd=cwd or agent_home(settings, project_id, config.agent_id),
             physical_session_id=session_id, provider=config.provider, model=model, reasoning_effort=effort,
             context_policy=config.context_policy, model_context_window_tokens=window,
             model_auto_compact_token_limit=compact, sandbox=sandbox, timeout_seconds=config.timeout_seconds,
             invocation_id=invocation_id, cancel_event=ctx.cancel, scoped_tools=allowed, scope_context=scope_context,
-            multi_agent_enabled=subagents > 0, max_concurrent_subagents=subagents, image_paths=image_paths))
+            multi_agent_enabled=subagents > 0, max_concurrent_subagents=subagents, image_paths=image_paths,
+            prompt_cache=cache_meta))
     finally:
         sharing.cancel()
         await asyncio.to_thread(sync, settings, project_id, direction="out")

@@ -2,6 +2,7 @@ schema_version: project.v2
 project_id: {project_id}
 display_name: {display_name}
 layout_version: 2
+project_kind: business    # descriptive mirror; database kind is authoritative
 created_by: kernel-core-bootstrap
 created_at: {created_at}
 validation_policy:

@@ -1,6 +1,7 @@
 """ROUND3 S3: the shared job and service runtime (manifest → core.jobs → job runs → alerts, /jobs, health)."""
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -298,6 +299,120 @@ async def test_script_timeout(kernel_settings, vault):
     from assistant_kernel.core.executors.job import run_script
     with pytest.raises(JobFailed, match="timeout"):
         await run_script(vault, job, {}, vault / "slow.log")
+
+
+@pytest.mark.parametrize("already_exited", [False, True])
+async def test_script_cancellation_kills_the_process_group(tmp_path, monkeypatch, already_exited):
+    from assistant_kernel.core.executors import job as job_executor
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    class HangingProcess:
+        pid = 4242
+
+        waits = 0
+
+        async def wait(self):
+            self.waits += 1
+            if self.waits == 1:
+                entered.set()
+                await asyncio.sleep(60)
+            return 0
+
+    entered = asyncio.Event()
+
+    async def spawn(*args, **kwargs):
+        return HangingProcess()
+
+    killed = []
+    monkeypatch.setattr(job_executor.asyncio, "create_subprocess_exec", spawn)
+    def kill(pid, sig):
+        killed.append((pid, sig))
+        if already_exited:
+            raise ProcessLookupError("already exited")
+    monkeypatch.setattr(job_executor.os, "killpg", kill, raising=False)
+    job = {"id": "cancel", "type": "script", "entry": "scripts/slow.py", "args": [],
+           "timezone": "Asia/Shanghai", "timeout_seconds": 30}
+    work = asyncio.create_task(job_executor.run_script(vault, job, {}, vault / "cancel.log"))
+    await entered.wait()
+    work.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await work
+    assert killed and killed[0][0] == 4242
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="Production script runner uses POSIX process groups")
+async def test_real_script_cancellation_stops_descendant_writes(tmp_path, monkeypatch):
+    import asyncio
+    import sys
+    from assistant_kernel.core.executors import job as job_executor
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    child = vault / "child.py"
+    child.write_text("import time\nfrom pathlib import Path\nwhile True:\n Path('alive').write_text(str(time.monotonic()))\n time.sleep(0.02)\n", "utf-8")
+    parent = vault / "parent.py"
+    parent.write_text("import subprocess,sys,time\nsubprocess.Popen([sys.executable,'child.py'])\ntime.sleep(60)\n", "utf-8")
+    monkeypatch.setattr(job_executor.runtime, "script_argv", lambda job: [sys.executable, str(parent)])
+    work = asyncio.create_task(job_executor.run_script(vault,
+        {"timezone": "UTC", "timeout_seconds": 10}, {}, vault / "cancel-real.log"))
+    try:
+        for _ in range(200):
+            if (vault / "alive").exists():
+                break
+            await asyncio.sleep(0.01)
+        assert (vault / "alive").exists(), "descendant did not start"
+    finally:
+        work.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(work, timeout=3)
+    stopped = (vault / "alive").read_text()
+    await asyncio.sleep(0.15)
+    assert (vault / "alive").read_text() == stopped
+
+
+async def test_two_projects_share_the_public_runtime_and_observation_flow(kernel, sim, kernel_settings, control):
+    """Content and maintenance projects use the same runtime/observation contract and stay isolated."""
+    from assistant_kernel.core import machine
+
+    manifest = """schema_version: runtime-manifest.v1
+jobs:
+  - id: daily-check
+    type: script
+    entry: scripts/check.py
+    schedule: {kind: cron, expression: "0 8 * * *"}
+    retries: 0
+"""
+    for project_id, output in (("p1", "content-ok"), ("p2", "maintenance-ok")):
+        root = kernel_settings.data_root / "vaults" / project_id
+        (root / "scripts").mkdir(parents=True, exist_ok=True)
+        (root / "scripts" / "check.py").write_text(f"print('{output}')\n", "utf-8")
+        await release(kernel, root, manifest, project_id)
+    assert await jobs.sync_runtime(kernel, kernel_settings) == 2
+    async with kernel.db.tx() as c:
+        await c.execute("UPDATE core.jobs SET next_at=now()-interval '1 minute'")
+    assert sorted(await jobs.schedule_jobs(kernel)) == ["daily-check", "daily-check"]
+    dispatcher = Dispatcher(kernel, {"job": execute_job}, services={"settings": kernel_settings})
+    await settle(dispatcher)
+
+    p2_script = kernel_settings.data_root / "vaults" / "p2" / "scripts" / "check.py"
+    p2_script.write_text("import sys\nprint('maintenance-failed')\nsys.exit(2)\n", "utf-8")
+    await jobs.run_now(kernel, "p2", "daily-check")
+    await settle(dispatcher)
+
+    observations = await kernel.evolution_context("p1", limit=10)
+    assert len(observations["job_observations"]) == 1
+    assert observations["job_observations"][0]["payload"]["status"] == "succeeded"
+    assert "content-ok" in observations["job_observations"][0]["payload"]["summary"]
+    observations = await kernel.evolution_context("p2", limit=10)
+    statuses = [row["payload"]["status"] for row in observations["job_observations"]]
+    assert statuses == ["failed", "succeeded"]
+    assert all(row["payload"]["job_id"] == "daily-check" for row in observations["job_observations"])
+
+    async with kernel.db.tx() as c:   # every observation belongs to its own project's real run, never a NULL project
+        rows = await (await c.execute("""SELECT e.project_id, r.project_id AS run_project FROM core.task_events e
+            JOIN core.runs r ON r.run_id = e.run_id WHERE e.kind='job_result' ORDER BY e.project_id""")).fetchall()
+    assert [row["project_id"] for row in rows] == ["p1", "p2", "p2"]
+    assert all(row["project_id"] == row["run_project"] for row in rows)
 
 
 async def test_jobs_command_and_service_health(kernel, sim, kernel_settings, vault, control, gateway):  # noqa: F811

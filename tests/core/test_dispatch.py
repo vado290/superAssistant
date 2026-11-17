@@ -148,6 +148,51 @@ async def test_model_cap_limits_parallel_model_runs(kernel, sim):
     assert await sim.item("p1") and await sim.item("p2")
 
 
+async def test_model_cap_counts_only_agent_jobs():
+    scripts = Scripts()
+    d = Dispatcher(None, {**scripts.executors(), "job": scripts.execute}, model_cap=1)
+    task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        for kind in ("script", "service_restart", "agent"):
+            d.inflight["job-run"] = ({"run_type": "job", "input": {"spec": {"type": kind}}}, task)
+            assert d._model_capacity_available() is (kind != "agent")
+            assert ("pm_turn" in d._claimable_types()) is (kind != "agent")
+            assert "job" in d._claimable_types()  # SQL still allows non-model jobs.
+            assert "validation" in d._claimable_types()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_model_cap_claim_filters_agents_but_allows_scripts(kernel):
+    from datetime import datetime, timezone
+    from assistant_kernel.core import machine
+
+    async with kernel.db.tx() as c:
+        for project, kind in (("p1", "agent"), ("p2", "script")):
+            await machine.enqueue_job(c, {"project_id": project, "job_id": kind, "kind": "job",
+                "spec": {"type": kind}}, datetime.now(timezone.utc), manual=True, mutex_key=f"job:{project}:{kind}")
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def executor(run, ctx):
+        entered.set()
+        await release.wait()
+        return {}
+
+    d = Dispatcher(kernel, {"job": executor}, model_cap=1)
+    # Occupy model capacity without using the database: the two queued jobs remain untouched.
+    d.inflight["occupied"] = ({"run_type": "pm_turn"}, None)
+    script = await d.claim_and_start()
+    assert script and script["input"]["spec"]["type"] == "script"
+    await entered.wait()
+    assert await d.claim_and_start() is None
+    del d.inflight["occupied"]
+    agent = await d.claim_and_start()
+    assert agent and agent["input"]["spec"]["type"] == "agent"
+    release.set()
+    await d.drain()
+
+
 async def test_serve_stops_gracefully(kernel, sim):
     scripts = Scripts()
     d = Dispatcher(kernel, scripts.executors(), poll_seconds=0.05)

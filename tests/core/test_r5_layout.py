@@ -48,7 +48,7 @@ def test_bundled_skills_are_switched_off(tmp_path):
     assert "imagegen/SKILL.md" in value and "skill-installer/SKILL.md" in value
 
 
-async def test_an_agent_works_in_its_own_folder(kernel_settings, project_files):
+async def test_an_agent_works_in_its_own_folder(kernel, kernel_settings, project_files):
     seen = {}
 
     class Harness:
@@ -59,7 +59,7 @@ async def test_an_agent_works_in_its_own_folder(kernel_settings, project_files):
     config = SimpleNamespace(agent_id="supervisor", allowed_tools=(), model=None, reasoning_effort=None, provider=None,
                              context_policy=None, model_context_window_tokens=None, model_auto_compact_token_limit=None,
                              timeout_seconds=60)
-    ctx = SimpleNamespace(services={"settings": kernel_settings, "harness": Harness()}, cancel=asyncio.Event())
+    ctx = SimpleNamespace(kernel=kernel, services={"settings": kernel_settings, "harness": Harness()}, cancel=asyncio.Event())
     await common.call_model(ctx, {"project_id": "p1", "run_id": "r1", "attempt": 1}, config, "x", task_id=None,
                             stage=None, session_id=None, tools=frozenset(), sandbox="read-only")
     assert seen["cwd"] == project_files / "agents" / "supervisor"

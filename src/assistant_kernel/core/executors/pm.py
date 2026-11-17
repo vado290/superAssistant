@@ -43,6 +43,8 @@ def skill_stage(task: dict[str, Any], stage: str) -> str:
 def render_turn(task: dict[str, Any], run_input: dict[str, Any], inputs: list[dict[str, Any]]) -> str:
     stage = skill_stage(task, run_input["stage"])
     lines = [f"- Task goal: {task['goal']}", f"- Current stage: {STAGE_NAMES.get(stage, stage)} ({stage})"]
+    if task.get("review_profile"):
+        lines.append(f"- Platform-assigned review profile: {task['review_profile']}")
     if task.get("reason"):
         lines.append(f"- Why it was started: {task['reason']}")
     if task.get("track") == "quick" and stage in QUICK_NOTES:
@@ -78,13 +80,14 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
     code = await asyncio.to_thread(gitdelivery.config, settings, run["project_id"])   # None: file delivery
     in_worktree = bool(code) and stage in ("build", "review")   # then Codex cannot find the PM's skills itself
     config = await asyncio.to_thread(load_agent, settings, run["project_id"], "pm", stage=matched,
-                                     task_kind=task["kind"], native=not in_worktree)
+                                     task_kind=task["kind"], native=not in_worktree,
+                                     project_kind=await kernel.project_kind(run["project_id"]))
     inputs = await kernel.turn_inputs(run)
     project_charter = await asyncio.to_thread(charter, settings, run["project_id"])
     profile = await asyncio.to_thread(knowledge_text, settings, run["project_id"], USER_PROFILE)
     brief = await asyncio.to_thread(knowledge_text, settings, run["project_id"], DOMAIN_BRIEF) \
         if matched in BRIEF_STAGES else ""
-    digest = await evolution_material(kernel, settings, run["project_id"]) if task["kind"] == "evolution" else ""
+    digest = await evolution_material(kernel, settings, run["project_id"], run=run) if task["kind"] == "evolution" else ""
     task_id = str(task["task_id"])
     session_id = None if run_input.get("fresh_session", True) else task["pm_session"].get("native_session_id")
     stage_kind = STAGE_DOCUMENT.get(stage)
@@ -148,7 +151,9 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
     parsed, model_result = await call_for_json(
         ctx, run, config, prompt, task_id=task_id, stage=stage, session_id=session_id,
         tools=tools, sandbox="danger-full-access" if build else "read-only", candidates=candidates,
-        subagents=MAX_SUBAGENTS if matched in SUBAGENT_STAGES else 0, cwd=workspace, images=images)
+        subagents=MAX_SUBAGENTS if matched in SUBAGENT_STAGES else 0, cwd=workspace, images=images,
+        stable_prefix="\n\n".join([f"# Project {run['project_id']} · PM turn ({STAGE_NAMES.get(matched, matched)})",
+                                  *(text for _, _, text in context)]))
     misfit = outcome_misfit(parsed, stage)
     if misfit and model_result.physical_session_id:   # tell the PM once, in the same session, instead of failing blind
         parsed, model_result = await call_for_json(
@@ -163,7 +168,7 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
     result = {"outcome": parsed.get("outcome"), "summary": str(parsed.get("summary") or ""),
               "questions": parsed.get("questions") or [], "session_id": model_result.physical_session_id,
               "config_sha256": config.config_sha256, "skills": list(config.skill_labels),
-              "usage": model_result.usage.model_dump(), "seen": seen}
+              "usage": model_result.usage.model_dump(), "model_metadata": model_result.metadata, "seen": seen}
     document = parsed.get("document") if isinstance(parsed.get("document"), dict) else {}
     named, markdown = document.get("kind"), document.get("markdown")
     if (named or markdown) and DOCUMENT_STAGE.get(named) != stage:
@@ -221,6 +226,15 @@ async def execute_pm(run: dict[str, Any], ctx) -> dict[str, Any]:
             if errors:
                 report["effect_review_error"] = "; ".join(filter(None, [report.get("effect_review_error"),
                     "record ids that match no single record or repeat: " + ", ".join(errors)]))
+        if kind in ("task_contract", "solution_design") and task["kind"] != "bootstrap":
+            # The Model plan (assistant-model-routing): parsed once here, checked by Kernel at build and release.
+            from assistant_kernel.core import model_plan
+            try:
+                rows = model_plan.parse(markdown)
+                if rows is not None:
+                    report["model_plan"] = rows
+            except ValueError as exc:
+                report["model_plan_error"] = str(exc)
         if kind == "task_contract" and task["kind"] == "bootstrap":   # the charter: Kernel creates the project from it
             try:
                 spec = rules.charter_spec(markdown)

@@ -15,6 +15,7 @@ from assistant_kernel.harness.codex_models import CodexModelCatalog, ResolvedCod
 from assistant_kernel.harness.context_budget import TurnUsage
 from assistant_kernel.storage import ProjectRuntimeManager
 from assistant_kernel.harness.process_control import run_managed_process
+from assistant_kernel.harness.mcp_cleanup import cleanup_mcp_processes
 
 
 def bundled_skills_off(codex_home: Path) -> list[str]:
@@ -229,6 +230,7 @@ class CodexCliHarness:
                     "permission_profile_sha256": request.permission_profile_sha256,
                     "scoped_tools": list(request.scoped_tools),
                     "writable_roots": [str(item) for item in request.writable_roots],
+                    "prompt_cache": request.prompt_cache,
                     **({"images": [{"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                                    for path in request.image_paths]} if request.image_paths else {}),
                 },
@@ -249,7 +251,6 @@ class CodexCliHarness:
                 on_started=request.process_started_callback,
             )
         finally:
-            from assistant_kernel.harness.mcp_cleanup import cleanup_mcp_processes
             process_cleanup=await asyncio.shield(cleanup_mcp_processes(invocation_id))
             (archive_dir/'mcp-cleanup.json').write_text(json.dumps(process_cleanup))
             if mcp_private is not None:mcp_private.unlink(missing_ok=True)
@@ -273,11 +274,9 @@ class CodexCliHarness:
             codex_home, parsed.physical_session_id
         )
         if native_usage is None:
-            context_usage = TurnUsage(
-                input_tokens=0,
-                output_tokens=parsed.usage.output_tokens,
-                reasoning_output_tokens=parsed.usage.reasoning_output_tokens,
-            )
+            # The turn-completed event is still authoritative for this invocation when
+            # native context metadata is unavailable; keep its input/cache counters.
+            context_usage = parsed.usage
             usage_metadata = {
                 "context_usage_known": False,
                 "usage_source": "turn_completed_total_fallback",
@@ -301,6 +300,18 @@ class CodexCliHarness:
             f"vault://{request.project_id}/"
             f"{archive_path.relative_to(runtime.vault_root).as_posix()}"
         )
+        cache = dict(request.prompt_cache.get("prompt_cache") or {})
+        if cache:
+            cached = context_usage.cached_input_tokens
+            total_input = context_usage.input_tokens
+            cache.update({
+                "cached_input_tokens": cached,
+                "input_tokens": total_input,
+                "cache_hit": cached > 0,
+                "cache_hit_ratio": round(cached / total_input, 4) if total_input else None,
+                "usage_source": usage_metadata["usage_source"],
+            })
+            usage_metadata["prompt_cache"] = cache
         usage_metadata['mcp_runtime'] = {'receipt_count':len(mcp_receipts),
             'exposed_tools':sorted({name for r in mcp_receipts for name in r.get('exposed',[])}),
             'receipts':[{'uri':f'vault://{request.project_id}/'+path.relative_to(runtime.vault_root).as_posix(),

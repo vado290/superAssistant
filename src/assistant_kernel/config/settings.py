@@ -73,6 +73,7 @@ class KernelSettings(BaseModel):
     worker_lease_seconds: int = 60
     health_heartbeat_seconds: float = 30
     health_stale_after_seconds: float = 90
+    project_access_enabled: bool = False  # staged rollout: never enabled by a migration
     agent_timeout_seconds: int = 600
     default_codex_provider: str = "openai"
     # Fallbacks only: the model settings live in config/models.yaml (core/models.py, 0.46.1); None lets Codex choose.
@@ -133,6 +134,7 @@ class KernelSettings(BaseModel):
             python_timeout_seconds=int(os.getenv("ASSISTANT_PYTHON_TIMEOUT_SECONDS", "300")),
             worker_poll_seconds=float(os.getenv("ASSISTANT_WORKER_POLL_SECONDS", "1")),
             worker_lease_seconds=int(os.getenv("ASSISTANT_WORKER_LEASE_SECONDS", "60")),
+            project_access_enabled=os.getenv("ASSISTANT_PROJECT_ACCESS_ENABLED", "0").lower() in {"1", "true"},
             agent_timeout_seconds=int(os.getenv("ASSISTANT_AGENT_TIMEOUT_SECONDS", "600")),
             default_codex_provider=os.getenv("ASSISTANT_DEFAULT_CODEX_PROVIDER", "openai"),
             default_codex_model=os.getenv("ASSISTANT_DEFAULT_CODEX_MODEL", "").strip() or None,

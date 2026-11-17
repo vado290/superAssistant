@@ -20,6 +20,7 @@ jobs:
     timeout_seconds: 600            # 10–21600
     retries: 1                      # 0–5 retries after a failure
     notify: supervisor              # which channel gets failure alerts: supervisor | pm | none
+    idempotent: false               # optional: true only if running it twice is harmless (see below)
   - id: weekly-insight
     type: agent                     # an agent inside the product: one read-only model turn per run, result posted to a channel
     entry: agents/analyst           # needs agents/analyst/config.yaml and role.md; its skills are those whose load.roles includes analyst
@@ -37,6 +38,14 @@ services:
   project files. A non-zero exit code is a failure. Output goes to logs under `runs/jobs/<id>/`.
 - Of missed times only the latest is run; while the previous run is still going, this one is skipped. Scripts must be
   safe to run repeatedly (idempotent).
+- `retries` covers known failures (a non-zero exit code). When Kernel loses contact with a running job, whether its
+  work took effect is **unknown**: Kernel does not run it again by itself, records an `unknown` result and alerts the
+  Supervisor channel (even with `notify: none`) — check the output, then `/jobs run`. Only a job declared
+  `idempotent: true` (running it twice is harmless) is retried automatically in that case; scheduled service
+  restarts always are.
+- Pausing a job withdraws its queued runs (a run already going finishes); a paused job cannot be run with `/jobs run`
+  until resumed. A run queued under an earlier version of the job, or of a job since retired, is withdrawn; if it was
+  already running, its result is recorded but does not change the job's status.
 - Approving the deletion of an item means retiring it; after Kernel syncs, check the receipt that it actually stopped
   or was removed — a failure stays pending for a retry. A changed schedule applies from its next time.
 - Kernel registers only a **released** jobs.yaml: editing jobs.yaml in the vault from a shell has no effect (Kernel

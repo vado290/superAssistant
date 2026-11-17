@@ -63,7 +63,7 @@ class GatewayService:
             elif command[0] == "/iterations":
                 reply = await self.iterations_text(project_id, command[1:])
             elif command[0] == "/jobs":
-                reply = await self.jobs_command(project_id, command[1:])
+                reply = await self.jobs_command(project_id, command[1:], message_id=message_id)
             elif command[0] == "/evolve":
                 await self.kernel.start_evolution(project_id, idempotency_key=f"evolution:{project_id}:msg:{message_id}")
                 reply = t("gw.evolve")
@@ -139,6 +139,8 @@ class GatewayService:
         pages = render.question_pages(item)
         page = int(rest[0]) if rest else 0
         if len(pages) > 1:
+            # Never keep a key in the card's drafts (database): store secret answers first, keep only their notes.
+            answers = await self.kernel.store_secret_answers(project_id, item_id, answers)
             await self.kernel.save_draft(project_id, task_id, answers)
         missing = [q["text"] for q in item["content"]["questions"] if q.get("required", True) and not answers.get(q["id"])]
         if missing and page < len(pages) - 1:
@@ -149,13 +151,15 @@ class GatewayService:
 
     async def _act(self, project_id, item_id, action, values, user_id, interaction_id) -> Reply:
         try:
-            await self.kernel.act(project_id, item_id, action, values, user_id=user_id,
+            result = await self.kernel.act(project_id, item_id, action, values, user_id=user_id,
                                   external_event_id=f"click:{interaction_id}")
         except StaleItem as exc:
             return Reply(f"{t('gw.stale')} ({exc})")
         except ValueError as exc:
             return Reply(t("gw.cannot", error=exc))
         await self.sync_cards(project_id)
+        if result.get("access_status") in {"expired", "stale"}:
+            return Reply(t("access.not_approved", status=result["access_status"]))
         return Reply(render.done_reply(action))
 
     # ------------------------------------------------------------ outbound
@@ -180,9 +184,13 @@ class GatewayService:
             if item_id not in current:
                 try:
                     await self.transport.edit(shown["channel_id"], shown["message_id"], await self.kernel.card_item_status(pid=card["project_id"], item_id=item_id))
-                except Exception:
-                    log.warning("could not retire card message %s; will retry", shown["message_id"], exc_info=True)
-                    continue
+                except Exception as exc:
+                    # Discord's 404 means the user already removed the message. Forget the
+                    # stale display record so it cannot block later cards; retry other errors.
+                    if "404" not in str(exc) or "Unknown Message" not in str(exc):
+                        log.warning("could not retire card message %s; will retry", shown["message_id"], exc_info=True)
+                        continue
+                    log.info("card message %s was already deleted", shown["message_id"])
                 del display["messages"][item_id]
                 changed = True
         for item_id, item in current.items():
@@ -222,6 +230,11 @@ class GatewayService:
                 text += "\n" + self.transport.link(reference["channel_id"], reference["message_id"])
             if message["body"].get("link_message"):
                 text += f"\n👉 {await self._link_to(message['body']['link_message'])}"
+            body = await self.kernel.begin_delivery(message["message_id"])   # from here the outcome may be unknown
+            if body is None:
+                continue
+            if body.get("maybe_duplicate"):
+                text = t("gw.maybe_duplicate") + "\n" + text
             try:
                 text, attachment = render._fit(text)
                 external = await self.transport.send(channel_id, text, attachment=attachment)
@@ -230,6 +243,8 @@ class GatewayService:
                               "marked failed" if expired else "will retry")
                 if expired:
                     await self.kernel.mark_delivered(message["message_id"], external_id=None, ok=False)
+                else:
+                    await self.kernel.delivery_failed_known(message["message_id"])
                 continue
             await self.kernel.mark_delivered(message["message_id"], external_id=f"out:{external}")
             delivered += 1
@@ -274,8 +289,13 @@ class GatewayService:
     def _field(q: dict, drafts: dict, item: dict) -> dict:
         """One modal field; a credential question gets no suggested answer and says where the answer goes."""
         credential = q.get("credential") if isinstance(q.get("credential"), dict) else None
+        setup = q.get("model_setup") if isinstance(q.get("model_setup"), dict) else None
         if credential:
             placeholder = i18n.t("gw.credential_placeholder", key=credential.get("key"))[:100]
+            default = ""
+        elif setup:
+            placeholder = i18n.t("gw.model_setup_placeholder",
+                                 vendor=setup.get("recommended_vendor") or "dashscope")[:100]
             default = ""
         else:
             placeholder = i18n.t("gw.optional_options", options=" / ".join(map(str, q["options"])))[:100] \
@@ -348,7 +368,7 @@ class GatewayService:
         return t("cmd.iterations", days=days) + "\n" + \
             iterlog.render(rows, brief=True)
 
-    async def jobs_command(self, project_id: str, args: list[str]) -> str:
+    async def jobs_command(self, project_id: str, args: list[str], *, message_id: str | None = None) -> str:
         """/jobs · /jobs pause <id> · /jobs resume <id> · /jobs run <id> (ROUND3 S3)."""
         from assistant_kernel.core import jobs
         if not args:
@@ -356,8 +376,11 @@ class GatewayService:
         if len(args) != 2 or args[0] not in ("pause", "resume", "run"):
             return t("cmd.jobs_usage")
         action, job_id = args
-        if action == "run":
-            run = await jobs.run_now(self.kernel, project_id, job_id)
+        if action == "run":   # a redelivered command message returns the run it already queued
+            run = await jobs.run_now(self.kernel, project_id, job_id,
+                                     request_key=f"msg:{message_id}" if message_id else None)
+            if run and run.get("refused") == "paused":
+                return t("cmd.job_run_paused", job=job_id)
             return t("cmd.job_run", job=job_id) if run else t("cmd.job_missing", job=job_id)
         job = await jobs.set_status(self.kernel, project_id, job_id, "paused" if action == "pause" else "enabled")
         if job is None:

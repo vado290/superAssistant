@@ -432,21 +432,29 @@ async def _import_commits(kernel, settings) -> int:
 # ------------------------------------------------------------------ template skills → each project (ROUND5 R5.2 fix)
 
 async def _sync_templates(kernel, settings) -> int:
-    """Once per Kernel version (ROUND5 D24): give every project the template skills new to it and refresh the copies
-    it never edited (skills.sync_templates), committing just the agents' folders. Edited copies stay for the weekly
-    review. Then the operator-approved adoption batches (skill_updates; nothing happens without a policy)."""
+    """Once per Kernel version/template fingerprint (ROUND5 D24): give every project the template skills new to it and refresh the copies
+    it never edited (skills.sync_templates), committing just the agents' folders. Edited copies stay as they are until
+    an explicit adoption or an approved task changes them. A project with a run in progress is synced on a later tick,
+    so one model turn never reads two versions of a skill. Then the operator-approved adoption batches (skill_updates;
+    nothing happens without a policy)."""
     from assistant_kernel import __version__
     from assistant_kernel.core import projectgit
     from assistant_kernel.core.skill_updates import WRITING, list_updates, maintain
     changed = 0
+    fingerprint = await asyncio.to_thread(skills.template_fingerprint)
     for project_id in await kernel.active_projects():
         vault = _vault(settings, project_id)
-        if (skills.offered(vault) or {}).get("kernel_version") == __version__:
+        record = skills.offered(vault) or {}
+        if record.get("kernel_version") == __version__ and record.get("template_fingerprint") == fingerprint:
             continue
         if any(row["status"] in WRITING for row in await list_updates(kernel, project_id, 100)):
             continue   # an adoption batch is writing this project's skills: next tick
+        async with kernel.db.tx() as c:
+            if await all_rows(c, """SELECT 1 FROM core.runs WHERE project_id=%s
+                                    AND status IN ('running','reconciling') LIMIT 1""", (project_id,)):
+                continue   # a run in progress may be reading these skills: next tick
         result = await asyncio.to_thread(skills.sync_templates, vault, skills.project_config(vault)["capabilities"],
-                                         __version__)
+                                         __version__, await kernel.project_kind(project_id))
         if result["installed"] or result["refreshed"]:
             changed += 1
             try:

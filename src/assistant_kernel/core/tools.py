@@ -72,7 +72,8 @@ class Scope:
     async def check_lease(self) -> None:
         async with Database(self.settings).tx() as c:
             held = await one(c, """SELECT 1 FROM core.runs WHERE run_id=%s AND claim_token=%s
-                                   AND status='running' AND NOT cancel_requested""", (self.run_id, self.claim_token))
+                                   AND status='running' AND NOT cancel_requested AND lease_until > now()""",
+                             (self.run_id, self.claim_token))
         if held is None:
             raise PermissionError("this invocation's run is no longer active")
 
@@ -162,6 +163,72 @@ def build_server(scope: Scope) -> MCPServer:
         if include_resource_guide:
             result["resource_guide"] = workspace.resource_guide(project_id)
         return result
+
+    from assistant_kernel.core.project_access import ProjectAccessService
+    access = ProjectAccessService(settings)
+    identity = {"run_id": scope.run_id, "claim_token": scope.claim_token}
+
+    @tool(READ_ONLY)
+    async def read_portfolio_snapshot(limit: int = 20, cursor: str | None = None) -> dict:
+        """Read one authorized catalog/summary page, coverage and policy revision; not live health."""
+        return await access.portfolio_snapshot(project_id, limit=limit, cursor=cursor, **identity)
+
+    @tool(READ_ONLY)
+    async def list_workspace_projects() -> dict:
+        """List minimal project identifiers, names and readiness; never returns project content."""
+        return {"items": await access.discoverable_projects(project_id)}
+
+    @tool(READ_ONLY)
+    async def list_accessible_projects(read_scope: str = "summary") -> dict:
+        """List projects currently authorized for one bounded read category."""
+        return {"project_ids": await access.accessible_project_ids(project_id, read_scope)}
+
+    @tool(READ_ONLY)
+    async def read_project_catalog(target_project_id: str) -> dict:
+        """Read approved public charter sections of a target project, on demand."""
+        return await access.read_project_catalog(project_id, target_project_id, **identity)
+
+    @tool(READ_ONLY)
+    async def read_project_summary(target_project_id: str) -> dict:
+        """Read approved target project task counts, without changing target state."""
+        return await access.read_project_summary(project_id, target_project_id, **identity)
+
+    @tool(READ_ONLY)
+    async def list_project_history(target_project_id: str, lookback_days: int = 365, limit: int = 50,
+                                   cursor: str | None = None) -> dict:
+        """Read bounded business conversation history from an authorized target project.
+
+        Returns only Discord/API text messages; Kernel control notices, attachments, credentials
+        and arbitrary files are excluded. Reuse next_cursor for older pages.
+        """
+        return await access.read_project_history(project_id, target_project_id,
+                                                 lookback_days=lookback_days, limit=limit,
+                                                 cursor=cursor, **identity)
+
+    @tool(READ_ONLY)
+    async def list_project_documents(target_project_id: str, limit: int = 50, cursor: str | None = None) -> dict:
+        """List approved task document references from an authorized target Project."""
+        return await access.list_project_documents(project_id, target_project_id, limit=limit, cursor=cursor, **identity)
+
+    @tool(READ_ONLY)
+    async def read_cross_project_document(target_project_id: str, task_id: str, kind: str) -> dict:
+        """Read one registered business document; arbitrary paths and runtime files are unavailable."""
+        return await access.read_project_document(project_id, target_project_id, task_id=task_id, kind=kind, **identity)
+
+    @tool(READ_ONLY)
+    async def list_project_tasks(target_project_id: str, limit: int = 30, cursor: str | None = None) -> dict:
+        """Read one authorized task page; authorization is checked again for every page."""
+        return await access.read_project_tasks(project_id, target_project_id, limit=limit, cursor=cursor, **identity)
+
+    @tool(SCOPED_WRITE)
+    async def request_project_access(targets: list[str], read_scopes: list[str], expires_at: str,
+                                     reason: str, idempotency_key: str) -> dict:
+        """Create a source-project approval item, never grant access. Requires an explicit expiry."""
+        from assistant_kernel.core.kernel import Kernel
+        return await Kernel(settings).request_project_access(project_id,
+            {"targets": targets, "read_scopes": read_scopes, "expires_at": expires_at, "reason": reason},
+            idempotency_key=idempotency_key, source_run_id=scope.run_id,
+            claim_token=scope.claim_token)
 
     @tool(READ_ONLY)
     def list_authorized_tree(root_key: str = "project", relative_path: str = "", max_depth: int = 2,
@@ -338,6 +405,29 @@ def build_server(scope: Scope) -> MCPServer:
         if item is None:
             raise FileNotFoundError(f"no credential {key}; list the existing keys with list_credentials")
         return item
+
+    @tool(READ_ONLY)
+    async def kernel_model_catalog() -> dict:
+        """Model capabilities with their default profile and what can call them today (available_via), profiles with
+        catalog prices (budget estimates, dated), whether each vendor is configured (true/false — never a key), and for
+        a task: the submitted Model plan with its gaps, plus the current draft's plan as Kernel would parse it."""
+        from assistant_kernel.core import model_plan
+        task = None
+        if scope.task_id:
+            async with Database(settings).tx() as c:
+                task = await one(c, """SELECT kind, track, stage, documents FROM core.tasks
+                                       WHERE task_id::text=%s AND project_id=%s""", (scope.task_id, project_id))
+        view = model_plan.catalog_view(settings, task)
+        stage_kind = {"requirements": "task_contract", "design": "solution_design"}.get(scope.stage or "")
+        if task and stage_kind and stage_kind in drafts.editable(scope.stage):
+            draft = drafts.load(settings, project_id, scope.task_id, stage_kind)
+            if draft and draft.get("markdown"):
+                try:
+                    rows = model_plan.parse(draft["markdown"])
+                    view["draft_plan"] = None if rows is None else {"rows": rows, "estimate": model_plan.estimate(rows)}
+                except ValueError as exc:
+                    view["draft_plan"] = {"error": str(exc)}
+        return view
 
     @tool(READ_ONLY)
     async def list_recent_history(lookback_days: int = 365, limit: int = 50, cursor: str | None = None,

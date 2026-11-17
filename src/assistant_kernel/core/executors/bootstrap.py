@@ -81,7 +81,7 @@ def write_project_files(settings, spec: dict[str, Any]) -> list[str]:
         target.write_text(fill(source.read_text("utf-8"), values), "utf-8", newline="\n")
         written.append(target.relative_to(vault).as_posix())
     config = yaml.safe_load(existing.read_text("utf-8")) or {}
-    config.update({key: spec[key] for key in ("capabilities", "delivery", "share_with_kernel") if key in spec})
+    config.update({key: spec[key] for key in ("project_kind", "capabilities", "delivery", "share_with_kernel") if key in spec})
     if spec.get("delivery") == "git-repo":   # code delivery: the project's own repository inside its vault
         config.setdefault("repository", "repo")
         config.setdefault("main_branch", "main")
@@ -119,7 +119,7 @@ def write_project_files(settings, spec: dict[str, Any]) -> list[str]:
                         i18n.t("files.created_brief", date=created), research)
     capabilities = skills.project_config(vault)["capabilities"]
     written += [f"agents/{copy.split('/')[0]}/.agents/skills/{copy.split('/')[1]}"
-                for copy in skills.install_templates(vault, capabilities)]
+                for copy in skills.install_templates(vault, capabilities, spec.get("project_kind") or "business")]
     return written
 
 
@@ -194,6 +194,6 @@ async def execute_bootstrap(run: dict[str, Any], ctx) -> dict[str, Any]:
     creator = ctx.services.get("discord_channels") or channel_creator(settings)
     channels = await creator.ensure(spec["project_id"], spec["display_name"], spec["purpose"])
     await asyncio.to_thread(add_routing, gateway_config_path(settings), spec["project_id"], channels)
-    await ctx.kernel.ensure_project(spec["project_id"])
+    await ctx.kernel.ensure_project(spec["project_id"], kind=spec.get("project_kind", "business"), lifecycle="pending")
     return {"outcome": "created", "project_id": spec["project_id"], "channels": channels, "files": files,
             "guild_id": getattr(creator, "guild_id", None)}

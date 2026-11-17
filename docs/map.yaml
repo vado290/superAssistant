@@ -1,5 +1,20 @@
 schema_version: project-map.v1
 entries:
+- path: src/assistant_kernel/core/sql/0014_chief_of_staff.sql
+  kind: migration
+  purpose: Add the database-owned Chief of Staff project kind and immutable review profiles
+- path: src/assistant_kernel/core/sql/0015_kernel_identity.sql
+  kind: migration
+  purpose: Mark the configured platform project as Kernel so CoS portfolio policies cover business projects only
+- path: src/assistant_kernel/prompts/core/chief-of-staff.md
+  kind: other
+  purpose: Hard boundaries for the database-owned Chief of Staff project
+- path: src/assistant_kernel/prompts/skills/assistant-chief-of-staff/SKILL.md
+  kind: skill
+  purpose: Chief of Staff working method for goals, portfolio evidence, options and bounded next steps
+- path: docs/CHIEF_OF_STAFF_CHARTER.md
+  kind: doc
+  purpose: Executable Chief of Staff charter with first-release functions and explicit later-phase boundaries
 - path: docs/IMAGE_INPUT.md
   kind: doc
   purpose: Inbound-only Discord image limits, task continuity, compatibility and rollout boundary
@@ -15,6 +30,21 @@ entries:
 - path: src/assistant_kernel/core/skill_updates.py
   kind: module
   purpose: 技能采用批次、可信基线、完整目录核对、写入互斥与中断恢复；默认关闭
+- path: src/assistant_kernel/core/model_catalog.py
+  kind: module
+  purpose: Model catalog and provider model selection for Kernel turns
+- path: src/assistant_kernel/core/model_plan.py
+  kind: module
+  purpose: Model plan validation and execution requirements
+- path: src/assistant_kernel/core/model_secrets.py
+  kind: module
+  purpose: Model credential and secret resolution boundaries
+- path: src/assistant_kernel/core/project_access.py
+  kind: module
+  purpose: Project-level bounded read policies and portfolio snapshots
+- path: src/assistant_kernel/core/prompt_cache.py
+  kind: module
+  purpose: Stable prompt prefix metadata and cache usage accounting
 - path: tests/core/test_skill_updates.py
   kind: test
   purpose: 技能采用的定制保护、并发领取、回退、中断及旧任务兼容验证
@@ -356,3 +386,25 @@ entries:
 - path: src/assistant_kernel/host_client/artifacts.py
   kind: module
   purpose: Scoped local artifact staging and integrity verification; no upload or arbitrary file import
+
+- path: tests/core/test_project_access.py
+  kind: test
+  purpose: Project access normalization, policy CAS, approval expiry, revocation and read boundaries
+
+- path: src/assistant_kernel/core/sql/0011_project_access.sql
+  kind: migration
+  purpose: Project lifecycle facts, versioned read-only access policies, bounded access requests and audit records
+
+- path: src/assistant_kernel/core/sql/0012_project_access_simplify.sql
+  kind: migration
+  purpose: Remove empty unused creation claims and restrict access requests to selected reads
+
+- path: src/assistant_kernel/core/sql/0013_project_lifecycle_backfill.sql
+  kind: migration
+  purpose: Backfill missing project lifecycle facts without changing existing states or granting access
+- path: docs/CHIEF_OF_STAFF_PLAN.md
+  kind: doc
+  purpose: Phased Chief of Staff identity, Discord entry points, authorized reads, coordination and context migration
+- path: tests/core/test_chief_of_staff.py
+  kind: test
+  purpose: Chief of Staff identity, review profiles, bootstrap retry and Discord entry points

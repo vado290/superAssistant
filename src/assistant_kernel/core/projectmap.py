@@ -22,7 +22,7 @@ import yaml
 
 SCHEMA = "project-map.v1"
 PROJECT_PREFIX = "project:"
-KINDS = ("directory", "entry", "module", "script", "config", "doc", "skill", "agent", "data", "test", "other")
+KINDS = ("directory", "entry", "module", "script", "config", "doc", "prompt", "skill", "agent", "data", "test", "migration", "other")
 SKIP_DIRS = {"data", "tests", "docs", "__pycache__", ".git", "archive", "runs", "runtime", ".agents",
              "build", "dist", ".venv", "venv", "node_modules"}
 RENDER_LIMIT = 8000

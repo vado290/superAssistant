@@ -38,7 +38,7 @@ def test_agents_read_the_archive_as_the_charters_last_section(kernel_settings, p
     assert text.startswith("# 章程") and skills.section_text(text, vault_sync.ARCHIVE).count("公共：在上海") == 1
     assert "# 背景信息存档\n" not in text                                                # the file's own title is dropped
     found = shared_candidates(kernel_settings, ["p1", "p2"], exclude="p2")             # other projects' public facts
-    assert "p1: 在上海" in found
+    assert found == ""  # P1: background is not exported through a public-fact prefix
 
 
 def test_commits_leave_ignored_paths_out_instead_of_failing(tmp_path):

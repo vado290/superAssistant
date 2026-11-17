@@ -180,6 +180,7 @@ gw.cannot: 'Cannot do that: {error}'
 gw.no_channel: (the target project's channel is not configured)
 gw.reminder: '⏰ A card has been waiting about {hours} hours: {link}'
 gw.credential_placeholder: Saved as project credential {key}; never in the conversation record
+gw.model_setup_placeholder: 'API key for {vendor} (or "vendor: key"), or: skip / later'
 gw.optional_options: 'Optional: {options}'
 cmd.models_header: 'Model settings ({file}; each value comes from the first that sets it: the agent''s config, its profile, defaults[role], default_profile, then Codex''s own default). Change them in that file; they apply from the next turn.'
 cmd.models_line: '- {project} · {role}: {model} · effort {effort} — profile {profile}; model from {model_source}, effort from {effort_source}'
@@ -196,6 +197,8 @@ cmd.iterations: 'Changes in the last {days} days (at most 20):'
 cmd.jobs_usage: 'Usage: /jobs · /jobs pause <id> · /jobs resume <id> · /jobs run <id>'
 cmd.job_run: Job {job} will run now (its schedule is unchanged); a failure is reported in the Supervisor channel.
 cmd.job_missing: No job {job}.
+cmd.job_run_paused: Job {job} is paused; send /jobs resume {job} first.
+gw.maybe_duplicate: (May be a repeat — the earlier send's outcome is unknown.)
 cmd.job_missing_service: No job {job} (a service cannot be paused; disable it in jobs.yaml).
 cmd.job_paused: Job {job} paused.
 cmd.job_resumed: Job {job} resumed.
@@ -309,9 +312,14 @@ mx.job_failed: '⚠ Job {job} failed (after {attempts} attempts): {reason}
   Logs are in runs/jobs/{job}/; send /jobs run {job} to retry or /jobs pause {job} to pause it.'
 mx.consult_failed: ⚠ The Supervisor cannot answer this message right now; please ask again later. ({reason})
 mx.triage_failed: ⚠ This message cannot be handled right now; please send it again later. ({reason})
+mx.review_input_failed: ⚠ Your addition could not be reviewed right now ({reason}). The open card still stands; answer it directly, or send the addition again.
+mx.triage_attached: ⚠ This message could not be sorted right now ({reason}), so it was added to the current task as a supplement.
+mx.observe_failed: ⚠ The Supervisor could not review the latest result of job {job} ({reason}). The result stays recorded; check it with /jobs.
+mx.job_unknown: '⚠ Job {job} lost contact while running, so whether its work took effect is unknown; it was not run again automatically. Check its output and logs in runs/jobs/{job}/; send /jobs run {job} to run it again once checked.'
 mx.publish_broken: The release failed or was interrupted — check what actually happened.
 mx.run_failed: '{run_type} failed repeatedly: {error}'
 mx.release_not_approved: 'Not approved this time: {error}. {recovery}'
+mx.model_gate: 'Not done yet — {error}. Answer the model setup question, or ask for the step to be changed.'
 mx.release_ref_stale: the release card's references are out of date
 mx.recovery_review: Press "Decline" and the Supervisor will rearrange the review.
 mx.recovery_release: Press "Decline" and check the actual release result; the release stage cannot go straight back to review.
@@ -373,3 +381,18 @@ card.history_instruction: '**Confirmed PM instruction — queued**
 Task: {task} · Stage: {stage} · Card: {item}
 
 {instruction}'
+
+access.request_message: A project-level read-only access request is waiting for your approval.
+decision.project_access_request: Cross-project read-only access
+access.request_details: 'Targets: {targets}
+
+  Read categories: {scopes}
+
+  Expires at: {expires}
+
+  Reason: {reason}
+
+  This does not permit writing, routing, task dispatch or publishing.'
+access.not_approved: 'Access was not approved: request is {status}. Submit a new request if still needed.'
+
+kernel.cos_review_goal: Review the user's goals, priorities and next steps

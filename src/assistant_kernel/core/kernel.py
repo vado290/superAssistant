@@ -72,10 +72,80 @@ class Kernel:
 
     # ------------------------------------------------------------ projects and messages
 
-    async def ensure_project(self, project_id: str, *, kind: str = "business") -> None:
+    async def ensure_project(self, project_id: str, *, kind: str = "business", lifecycle: str | None = None) -> None:
+        """Register a project; incomplete bootstrap projects stay out of discovery."""
         async with self.db.tx() as c:
             await c.execute("INSERT INTO core.projects(project_id, kind) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                             (project_id, kind))
+            state = lifecycle or "ready"
+            await c.execute("""INSERT INTO core.project_lifecycle
+                (project_id, lifecycle_state, registration_origin, ready_at)
+                VALUES (%s, %s, %s, CASE WHEN %s='ready' THEN now() ELSE NULL END)
+                ON CONFLICT (project_id) DO NOTHING""",
+                (project_id, state, "bootstrap" if lifecycle == "pending" else "legacy_import", state))
+
+    async def project_kind(self, project_id: str) -> str:
+        """Authoritative identity: project.yaml is only a descriptive mirror."""
+        async with self.db.tx() as c:
+            project = await one(c, "SELECT kind FROM core.projects WHERE project_id=%s", (project_id,))
+            if project is None:
+                raise ValueError(f"unknown project {project_id}")
+            return project["kind"]
+
+    async def project_directory(self, source_project_id: str) -> list[dict[str, Any]]:
+        from assistant_kernel.core.project_access import ProjectAccessService
+        return await ProjectAccessService(self.settings).discoverable_projects(source_project_id)
+
+    async def project_access(self, source_project_id: str) -> dict[str, Any]:
+        from assistant_kernel.core.project_access import ProjectAccessService
+        return await ProjectAccessService(self.settings).current(source_project_id)
+
+    async def request_project_access(self, source_project_id: str, request: dict[str, Any], *,
+                                     idempotency_key: str, source_run_id=None,
+                                     source_task_id=None, claim_token=None) -> dict[str, Any]:
+        """Create an expiring read request; approval remains a separate source-project card action."""
+        from assistant_kernel.core.project_access import AccessPolicyError, ProjectAccessService, create_request_in_transaction
+        ProjectAccessService(self.settings).require_enabled()
+        async with self.db.tx() as c:
+            await lock_project(c, source_project_id)
+            if source_run_id is not None:
+                live = await one(c, """SELECT task_id FROM core.runs WHERE run_id=%s AND project_id=%s
+                    AND claim_token=%s AND status='running' AND NOT cancel_requested
+                    AND lease_until > clock_timestamp()""", (source_run_id, source_project_id, claim_token))
+                if live is None:
+                    raise PermissionError("access request run is no longer active")
+                if source_task_id is not None and str(source_task_id) != str(live["task_id"]):
+                    raise PermissionError("access request task does not belong to the leased run")
+                source_task_id = live["task_id"]
+            targets = {str(value).strip() for value in request.get("targets") or [] if str(value).strip()}
+            targets.discard(source_project_id)
+            if not targets:
+                raise AccessPolicyError("an access request needs another project")
+            eligible = await all_rows(c, """SELECT p.project_id FROM core.projects p
+                JOIN core.project_lifecycle l USING (project_id)
+                WHERE p.status='active' AND p.kind='business' AND l.lifecycle_state='ready'
+                  AND p.project_id = ANY(%s)""", (list(targets),))
+            if {str(row["project_id"]) for row in eligible} != targets:
+                raise AccessPolicyError("every target must be an active, ready business project")
+            created, replayed = await create_request_in_transaction(
+                c, source_project_id, {**request, "targets": sorted(targets)},
+                idempotency_key=idempotency_key, source_run_id=source_run_id, source_task_id=source_task_id)
+            if replayed:
+                return {"request_id": str(created["request_id"]), "status": created["status"], "replayed": True}
+            item = cards.new_item(
+                target_kind="project_access_request", target_id=str(created["request_id"]), kind="decision",
+                origin="supervisor", deliver_to="supervisor",
+                content={"decision": "project_access_request",
+                         "message": "A project-level read-only access request is waiting for your approval.",
+                         "actions": ["approve", "reject"],
+                         "data": {"request_id": str(created["request_id"]),
+                                  "targets": sorted(targets), "read_scopes": list(created["read_scopes"]),
+                                  "expires_at": created["candidate_expires_at"].isoformat(),
+                                  "reason": created["reason"]}})
+            await cards.add_item(c, source_project_id, item)
+            await c.execute("UPDATE core.project_access_requests SET card_item_id=%s WHERE request_id=%s",
+                            (item["item_id"], created["request_id"]))
+            return {"request_id": str(created["request_id"]), "status": "pending", "replayed": False}
 
     async def receive(self, project_id: str, *, role: str, text: str, channel: str = "api",
                       chat_id: str | None = None, user_id: str | None = None,
@@ -196,28 +266,43 @@ class Kernel:
                 return {"action": "duplicate"}
             result = await machine.on_action(c, project_id, item_id, action, values or {},
                                              source_message_id=record["message_id"], settings=self.settings)
-            return {"action": action, "task_id": str(result["task_id"]) if result.get("task_id") else None}
+            return {"action": action, "task_id": str(result["task_id"]) if result.get("task_id") else None,
+                    **({"access_status": result["access_status"]} if "access_status" in result else {})}
 
-    async def _store_credentials(self, project_id: str, item_id: str, answers: dict[str, Any]) -> dict[str, Any]:
-        """Answers to questions marked `credential` go to the project's credential file; the conversation keeps
-        only a note that they were stored (ROUND5 D8)."""
+    SECRET_NOTES = ("(saved as project credential ", "(model setup: ")
+
+    async def store_secret_answers(self, project_id: str, item_id: str, answers: dict[str, Any]) -> dict[str, Any]:
+        """Take secret answers out before anything is recorded (submits and saved drafts of multi-page cards alike):
+        `credential` answers go to the project's credential file (ROUND5 D8), `model_setup` answers to the vendor key
+        store (assistant-model-routing). What remains is a note; a note is never stored again as a value."""
         card = await self.card(project_id)
         item = next((i for i in (card or {}).get("items", []) if i["item_id"] == item_id), None)
-        marked = {q["id"]: q["credential"] for q in ((item or {}).get("content") or {}).get("questions") or []
+        questions = ((item or {}).get("content") or {}).get("questions") or []
+        marked = {q["id"]: q["credential"] for q in questions
                   if isinstance(q.get("credential"), dict) and q["credential"].get("key")}
-        if not marked:
+        setups = {q["id"]: q["model_setup"] for q in questions if isinstance(q.get("model_setup"), dict)}
+        if not marked and not setups:
             return answers
-        from assistant_kernel.core import credentials
-        from assistant_kernel.storage import ProjectRuntimeManager
-        vault = ProjectRuntimeManager(self.settings.data_root).ensure(project_id).vault_root
         stored = dict(answers)
-        for question_id, spec in marked.items():
+        if marked:
+            from assistant_kernel.core import credentials
+            from assistant_kernel.storage import ProjectRuntimeManager
+            vault = ProjectRuntimeManager(self.settings.data_root).ensure(project_id).vault_root
+            for question_id, spec in marked.items():
+                value = str(answers.get(question_id) or "").strip()
+                if value and not value.startswith(self.SECRET_NOTES):
+                    credentials.put(vault, str(spec["key"]), value, service=str(spec.get("service") or ""),
+                                    purpose=str(spec.get("purpose") or ""), source="user_card")
+                    stored[question_id] = f"(saved as project credential {spec['key']}; read it with get_credential)"
+        for question_id, spec in setups.items():
             value = str(answers.get(question_id) or "").strip()
-            if value:
-                credentials.put(vault, str(spec["key"]), value, service=str(spec.get("service") or ""),
-                                purpose=str(spec.get("purpose") or ""), source="user_card")
-                stored[question_id] = f"(saved as project credential {spec['key']}; read it with get_credential)"
+            if value and not value.startswith(self.SECRET_NOTES):
+                from assistant_kernel.core import model_secrets
+                stored[question_id] = await asyncio.to_thread(model_secrets.apply_setup_answer, self.settings, spec,
+                                                              value)
         return stored
+
+    _store_credentials = store_secret_answers   # the name used before model setup existed
 
     async def displayed_cards(self, project_id: str) -> list[dict[str, Any]]:
         """The open card plus closed cards whose channel messages still need tidying up."""
@@ -228,7 +313,7 @@ class Kernel:
                 (project_id,))).fetchall())
 
     async def card_item_status(self, *, pid: str, item_id: str) -> str:
-        """Resolve a retired card from facts, without guessing why an old card disappeared."""
+        """Resolve a retired card from recorded facts, without guessing its outcome."""
         from assistant_kernel.core.i18n import t
         async with self.db.tx() as c:
             action = await one(c, """SELECT payload FROM core.task_events WHERE project_id=%s
@@ -243,11 +328,41 @@ class Kernel:
         async with self.db.tx() as c:
             await cards.set_display(c, interaction_id, display)
 
+    SEND_UNKNOWN_AFTER = timedelta(minutes=10)
+
     async def pending_outbound(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Messages to send: never tried, or tried so long ago that the attempt's outcome is unknown (the gateway
+        stopped between sending and recording it)."""
         async with self.db.tx() as c:
             return list(await (await c.execute(
                 """SELECT * FROM core.messages WHERE direction='outbound' AND delivery_status='pending'
-                   ORDER BY created_at LIMIT %s""", (limit,))).fetchall())
+                     AND (NOT body ? 'sending_at' OR (body->>'sending_at')::timestamptz < now() - %s)
+                   ORDER BY created_at LIMIT %s""", (self.SEND_UNKNOWN_AFTER, limit))).fetchall())
+
+    async def begin_delivery(self, message_id) -> dict[str, Any] | None:
+        """Record that sending starts; returns the body (with `maybe_duplicate` once an earlier attempt's outcome was
+        unknown, so the text gets a repeat marker). None: already handled, or a second unknown-outcome attempt is
+        due — then it is marked failed instead of risking a third copy."""
+        async with self.db.tx() as c:
+            row = await one(c, """UPDATE core.messages SET body = body || jsonb_build_object('sending_at', now(),
+                                     'send_attempts', coalesce((body->>'send_attempts')::int, 0) + 1)
+                                     || CASE WHEN body ? 'sending_at' THEN '{"maybe_duplicate": true}'::jsonb
+                                             ELSE '{}'::jsonb END
+                                  WHERE message_id=%s AND delivery_status='pending' RETURNING body""", (message_id,))
+            if row is None:
+                return None
+            if int(row["body"]["send_attempts"]) > 2:
+                await c.execute("UPDATE core.messages SET delivery_status='failed' WHERE message_id=%s", (message_id,))
+                return None
+            return row["body"]
+
+    async def delivery_failed_known(self, message_id) -> None:
+        """The send raised, so this attempt did not go out: it may be tried again (an earlier unknown attempt keeps
+        its `maybe_duplicate` marker)."""
+        async with self.db.tx() as c:
+            await c.execute("""UPDATE core.messages SET body = (body - 'sending_at') || jsonb_build_object(
+                                   'send_attempts', greatest(coalesce((body->>'send_attempts')::int, 1) - 1, 0))
+                               WHERE message_id=%s AND delivery_status='pending'""", (message_id,))
 
     async def mark_delivered(self, message_id, *, external_id: str | None, ok: bool = True) -> None:
         async with self.db.tx() as c:
@@ -257,7 +372,9 @@ class Kernel:
     async def start_evolution(self, project_id: str, *, origin: str = "user",
                               idempotency_key: str | None = None) -> dict[str, Any]:
         """Queue a self-evolution review: the PM reviews the last week, the user decides on its proposals."""
-        return await self.create_task(project_id, goal=i18n.t(EVOLUTION_GOAL), origin=origin,
+        profile = rules.review_profile(await self.project_kind(project_id))
+        goal = i18n.t("kernel.cos_review_goal" if profile == "chief_of_staff" else EVOLUTION_GOAL)
+        return await self.create_task(project_id, goal=goal, origin=origin,
                                       kind="evolution",
                                       idempotency_key=idempotency_key)
 
@@ -278,7 +395,10 @@ class Kernel:
                 await lock_project(c, project_id)
                 due = await one(c, """
                 SELECT p.project_id FROM core.projects p WHERE p.project_id=%s
-                  AND p.status='active' AND coalesce((p.settings->>'weekly_evolution')::boolean, true)
+                  AND p.status='active' AND p.kind<>'chief_of_staff'
+                  AND EXISTS (SELECT 1 FROM core.project_lifecycle l
+                              WHERE l.project_id=p.project_id AND l.lifecycle_state='ready')
+                  AND coalesce((p.settings->>'weekly_evolution')::boolean, true)
                   AND NOT EXISTS (SELECT 1 FROM core.tasks t WHERE t.idempotency_key=%s)
                   AND NOT EXISTS (SELECT 1 FROM core.tasks t WHERE t.project_id=p.project_id AND t.kind='evolution'
                                     AND NOT (t.state = ANY(%s)))
@@ -310,7 +430,7 @@ class Kernel:
             idle = await all_rows(c, """
                 SELECT t.task_id, t.project_id FROM core.tasks t
                 WHERE t.state = 'awaiting_user' AND t.updated_at < now() - make_interval(days => %s)
-                  AND NOT EXISTS (SELECT 1 FROM core.messages m WHERE m.project_id = t.project_id
+                  AND NOT EXISTS (SELECT 1 FROM core.messages m WHERE m.task_id = t.task_id
                                   AND m.direction = 'inbound' AND m.created_at > now() - make_interval(days => %s))""",
                                   (days, days))
         expired = []
@@ -428,10 +548,35 @@ class Kernel:
                 FROM core.runs WHERE project_id=%s AND status='succeeded'
                   AND (result ? 'skills' OR result ? 'config_sha256')
                 ORDER BY created_at DESC, run_id DESC LIMIT 12""", (project_id,))
+            # Each observation with how it ended so far (daily operations): reviewed, proposed, task, closed, ...
+            observations = await all_rows(c, """SELECT e.event_id, e.run_id, e.created_at, e.payload,
+                (SELECT h.kind FROM core.task_events h WHERE h.project_id=e.project_id AND h.kind = ANY(%s)
+                   AND h.payload->>'event_id' = e.event_id::text ORDER BY h.event_id DESC LIMIT 1) AS handling
+                FROM core.task_events e WHERE e.project_id=%s AND e.kind='job_result'
+                ORDER BY e.created_at DESC, e.event_id DESC LIMIT %s""",
+                                          (list(machine.OBSERVATION_ENDS), project_id, limit + 1))
         return {"observed_at": datetime.now(timezone.utc).isoformat(),
                 "runtime": runtime[:limit], "runtime_truncated": len(runtime) > limit,
                 "related_tasks": tasks[:limit], "tasks_truncated": len(tasks) > limit, "recent_proposals": prior,
-                "recent_agent_runs": agent_runs}
+                "recent_agent_runs": agent_runs, "job_observations": observations[:limit],
+                "job_observations_truncated": len(observations) > limit}
+
+    async def daily_operations(self, project_id: str) -> bool:
+        async with self.db.tx() as c:
+            return await machine.project_switch(c, project_id, machine.DAILY_OPERATIONS)
+
+    async def observation(self, project_id: str, event_id) -> dict[str, Any] | None:
+        """One job observation of this project (never another project's), with the job's current state."""
+        if not str(event_id or "").isdigit():
+            return None
+        async with self.db.tx() as c:
+            row = await one(c, """SELECT event_id, created_at, payload FROM core.task_events
+                                  WHERE event_id=%s::bigint AND project_id=%s AND kind='job_result'""",
+                            (str(event_id), project_id))
+            if row:
+                row["job"] = await one(c, """SELECT job_id, kind, status, last_status, last_at, next_at, failures
+                    FROM core.jobs WHERE project_id=%s AND job_id=%s""", (project_id, row["payload"].get("job_id")))
+            return row
 
     async def recent_tasks(self, project_id: str, *, exclude=None, limit: int = 5,
                            include_basis: bool = False) -> list[dict[str, Any]]:
@@ -526,6 +671,24 @@ class Kernel:
                 "failures": failures, "event_counts": counts, "user_messages": inbound,
                 "delegations": [(d["name"] or "(unnamed)", d["n"]) for d in delegated], "jobs": job_runs}
 
+    async def platform_maintenance_metrics(self, days: int = 7) -> dict[str, Any]:
+        """Platform-only aggregate evidence for template maintenance; never return content/errors."""
+        days = min(max(int(days), 1), 30)
+        async with self.db.tx() as c:
+            rows = await all_rows(c, """SELECT p.project_id,
+                (SELECT count(*) FROM core.tasks t WHERE t.project_id=p.project_id
+                    AND t.updated_at > now()-make_interval(days => %s)) AS tasks,
+                (SELECT count(*) FROM core.runs r WHERE r.project_id=p.project_id
+                    AND r.created_at > now()-make_interval(days => %s) AND r.status='failed') AS failed_runs,
+                (SELECT count(*) FROM core.runs r WHERE r.project_id=p.project_id
+                    AND r.created_at > now()-make_interval(days => %s) AND r.attempt>1) AS retried_runs
+                FROM core.projects p JOIN core.project_lifecycle l USING(project_id)
+                WHERE p.status='active' AND p.kind='business' AND l.lifecycle_state='ready'
+                ORDER BY p.project_id LIMIT 101""", (days, days, days))
+        return {"observed_at": datetime.now(timezone.utc).isoformat(), "days": days,
+                "items": rows[:100], "truncated": len(rows)>100,
+                "limitations": "Counts are platform evidence only; content requires Project Access."}
+
     async def operational_baseline(self, project_id: str) -> dict[str, Any] | None:
         async with self.db.tx() as c:
             row = await one(c, "SELECT operational_baseline FROM core.projects WHERE project_id=%s", (project_id,))
@@ -538,9 +701,22 @@ class Kernel:
             return problems
 
     async def active_projects(self) -> list[str]:
+        """Ready projects only: maintenance must not create a pending bootstrap's vault."""
         async with self.db.tx() as c:
-            return [r["project_id"] for r in await all_rows(
-                c, "SELECT project_id FROM core.projects WHERE status='active' ORDER BY project_id")]
+            return [r["project_id"] for r in await all_rows(c, """SELECT p.project_id
+                FROM core.projects p JOIN core.project_lifecycle l USING(project_id)
+                WHERE p.status='active' AND l.lifecycle_state='ready' ORDER BY p.project_id""")]
+
+    async def routing_projects(self, exclude: str) -> list[dict[str, Any]]:
+        """Public registration of ready, routable projects (business and Chief of Staff, never Kernel)."""
+        async with self.db.tx() as c:
+            return list(await all_rows(c, """SELECT p.project_id, p.kind, p.settings
+                FROM core.projects p JOIN core.project_lifecycle l USING(project_id)
+                WHERE p.status='active' AND p.kind IN ('business','chief_of_staff') AND l.lifecycle_state='ready'
+                    AND p.project_id<>%s ORDER BY p.project_id LIMIT 100""", (exclude,)))
+
+    async def routing_project_ids(self, exclude: str) -> list[str]:
+        return [r["project_id"] for r in await self.routing_projects(exclude)]
 
     async def active_task(self, project_id: str) -> dict[str, Any] | None:
         async with self.db.tx() as c:
@@ -555,7 +731,8 @@ class Kernel:
     # ------------------------------------------------------------ runs
 
     async def claim(self, worker_id: str, *, lease_seconds: int = 900,
-                    run_types: tuple[str, ...] = CONTROL_RUNS) -> dict[str, Any] | None:
+                    run_types: tuple[str, ...] = CONTROL_RUNS,
+                    allow_agent_jobs: bool = True) -> dict[str, Any] | None:
         """Claim one runnable run. Every execution condition is in this one statement (principle P6)."""
         eligible = """r.status='queued' AND r.available_at <= now() AND r.run_type = ANY(%s)
                       AND (r.task_id IS NULL OR t.state = ANY(%s))
@@ -565,7 +742,9 @@ class Kernel:
                                       AND x.status IN ('running','reconciling')))
                       AND NOT EXISTS (SELECT 1 FROM core.skill_updates u WHERE u.project_id=r.project_id
                                       AND u.status IN ('applying','rolling_back','reconciling'))"""
-        conditions = (list(run_types), list(rules.ACTIVE_STATES))
+        # Filter the subtype inside the claiming SQL, not after claiming a script or agent.
+        eligible += " AND (%s OR r.run_type <> 'job' OR (r.input->'spec'->>'type') IS DISTINCT FROM 'agent')"
+        conditions = (list(run_types), list(rules.ACTIVE_STATES), allow_agent_jobs)
         try:
             async with self.db.tx() as c:
                 # Same project lock as skill adoption. Recheck all predicates in the UPDATE after acquiring it:
@@ -633,23 +812,38 @@ class Kernel:
             return row is not None
 
     async def recover_expired(self) -> int:
-        """Runs whose worker vanished: retry (or hand to the user once retries are used up)."""
+        """Runs whose worker vanished: retry (or hand to the user once retries are used up).
+
+        The first scan is only a work list.  The locked read must check the lease again,
+        because a heartbeat may renew it between the scan and project lock acquisition.
+        """
         async with self.db.tx() as c:
-            expired = list(await (await c.execute(
-                "SELECT run_id, project_id FROM core.runs WHERE status='running' AND lease_until < now()")).fetchall())
-        for row in expired:
+            candidates = list(await (await c.execute(
+                "SELECT run_id, project_id FROM core.runs WHERE status='running' AND lease_until < now()"
+            )).fetchall())
+        recovered = 0
+        for row in candidates:
             try:   # one run that cannot be failed must not keep the others stuck
                 async with self.db.tx() as c:
                     await lock_project(c, row["project_id"])
-                    run = await one(c, "SELECT * FROM core.runs WHERE run_id=%s AND status='running' FOR UPDATE",
-                                    (row["run_id"],))
-                    if run and run["lease_until"] is not None:
-                        # A publish may have partly applied: never retry it blindly.
-                        await self._fail(c, run, {"type": "lease_expired", "message": "worker stopped"},
-                                         retryable=run["run_type"] != "publish")
+                    run = await one(c, """SELECT * FROM core.runs
+                                       WHERE run_id=%s AND status='running'
+                                         AND lease_until IS NOT NULL AND lease_until < now()
+                                       FOR UPDATE""", (row["run_id"],))
+                    if run:
+                        # A publish may have partly applied: never retry it blindly. Nor a job that may have side
+                        # effects, unless its manifest declares it idempotent: its outcome is unknown, a person checks.
+                        spec = run["input"].get("spec") or {}
+                        unknown = run["run_type"] == "job" and not spec.get("idempotent") \
+                            and spec.get("type") != "service_restart"   # restarting a service again is harmless
+                        await self._fail(c, run, {"type": "result_unknown" if unknown else "lease_expired",
+                                                  "message": "worker stopped; the job may or may not have taken effect"
+                                                  if unknown else "worker stopped"},
+                                         retryable=run["run_type"] != "publish" and not unknown)
+                        recovered += 1
             except Exception:
                 log.exception("recovering expired run %s failed", row["run_id"])
-        return len(expired)
+        return recovered
 
     async def _held(self, c, run) -> dict[str, Any]:
         held = await one(c, "SELECT * FROM core.runs WHERE run_id=%s AND claim_token=%s AND status='running' FOR UPDATE",

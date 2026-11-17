@@ -37,6 +37,9 @@ class AgentTurnRequest:
     max_concurrent_subagents: int = 3
     process_started_callback: Callable[[int, int | None], Awaitable[None]] | None = None
     image_paths: tuple[Path, ...] = ()
+    # Provider-specific cache hints and Kernel-observed stable-prefix metadata.
+    # Adapters may ignore unsupported fields; secrets and prompt text never go here.
+    prompt_cache: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

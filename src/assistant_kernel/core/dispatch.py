@@ -18,6 +18,7 @@ from assistant_kernel.core import jobs
 from assistant_kernel.core.vault_sync import sync_vaults
 
 log = logging.getLogger(__name__)
+# Agent jobs share the per-dispatcher model valve; scripts and service restarts do not.
 MODEL_RUNS = ("pm_turn", "supervisor", "triage")
 
 
@@ -44,25 +45,30 @@ class Dispatcher:
         self.lease_seconds = lease_seconds
         self.poll_seconds = poll_seconds
         self.recover_every_seconds = recover_every_seconds
-        self.model_cap = model_cap                  # optional resource valve, off by default
+        self.model_cap = model_cap                  # per-dispatcher resource valve, off by default
         self.weekly_evolution = weekly_evolution    # only the production dispatcher schedules reviews
         self.run_jobs = run_jobs                    # ... and owns the project runtime (jobs, supervisord services)
         self.inflight: dict[str, tuple[dict[str, Any], asyncio.Task]] = {}
 
+    def _model_capacity_available(self) -> bool:
+        if self.model_cap is None:
+            return True
+        busy = sum(1 for run, _ in self.inflight.values()
+                   if run["run_type"] in MODEL_RUNS
+                   or (run["run_type"] == "job" and run["input"]["spec"]["type"] == "agent"))
+        return busy < self.model_cap
+
     def _claimable_types(self) -> tuple[str, ...]:
-        types = tuple(t for t in CONTROL_RUNS if t in self.executors)
-        if self.model_cap is not None:
-            busy = sum(1 for run, _ in self.inflight.values() if run["run_type"] in MODEL_RUNS)
-            if busy >= self.model_cap:
-                types = tuple(t for t in types if t not in MODEL_RUNS)
-        return types
+        return tuple(t for t in CONTROL_RUNS if t in self.executors
+                     and (self._model_capacity_available() or t not in MODEL_RUNS))
 
     async def claim_and_start(self) -> dict[str, Any] | None:
         """Claim one run and start executing it in the background; None when nothing is runnable."""
         types = self._claimable_types()
         if not types:
             return None
-        run = await self.kernel.claim(self.worker_id, lease_seconds=self.lease_seconds, run_types=types)
+        run = await self.kernel.claim(self.worker_id, lease_seconds=self.lease_seconds, run_types=types,
+                                      allow_agent_jobs=self._model_capacity_available())
         if run is None:
             return None
         task = asyncio.create_task(self._execute(run), name=f"run-{run['run_id']}")
@@ -100,20 +106,38 @@ class Dispatcher:
             await self.kernel.fail(run, error, retryable=retryable)
         except LeaseLost:
             log.warning("run %s failed after losing its lease", run["run_id"])
+        except Exception:   # e.g. the database is out of reach: the lease expires and recovery takes over
+            log.exception("reporting the failure of run %s failed", run["run_id"])
+
+    SELF_STOP_FRACTION = 0.8   # stop our own work when the lease could not be renewed for this share of it
 
     async def _heartbeat(self, run, context: ExecutionContext, work: asyncio.Task) -> None:
-        interval = max(1.0, self.lease_seconds / 3)
+        """Renew the lease. Unable to renew it for SELF_STOP_FRACTION of the lease (e.g. the database is out of
+        reach), stop the work ourselves, so it is not still running when lease recovery hands the run on."""
+        loop = asyncio.get_running_loop()
+        interval = max(0.1, self.lease_seconds / 3)   # always several beats before the self-stop deadline
+        deadline = loop.time() + self.lease_seconds * self.SELF_STOP_FRACTION   # the claim set the lease just now
         while True:
-            await asyncio.sleep(interval)
-            try:
-                alive = await self.kernel.heartbeat(run, self.lease_seconds)
-            except Exception:
-                log.exception("heartbeat for run %s failed; will retry", run["run_id"])
+            await asyncio.sleep(max(0.0, min(interval, deadline - loop.time())))
+            alive = None
+            if loop.time() < deadline:
+                try:
+                    alive = await asyncio.wait_for(self.kernel.heartbeat(run, self.lease_seconds),
+                                                   timeout=max(0.1, deadline - loop.time()))
+                except Exception:
+                    log.exception("heartbeat for run %s failed; will retry", run["run_id"])
+            if alive:
+                deadline = loop.time() + self.lease_seconds * self.SELF_STOP_FRACTION
                 continue
-            if not alive:  # task cancelled or lease taken: stop the work
-                context.cancel.set()
-                work.cancel()
-                return
+            if alive is None and loop.time() < deadline:
+                continue
+            # Cancelled, lease taken, or not renewable in time: stop the work.
+            if alive is None:
+                log.warning("run %s: lease not renewable for %.0f s; stopping its work", run["run_id"],
+                            self.lease_seconds * self.SELF_STOP_FRACTION)
+            context.cancel.set()
+            work.cancel()
+            return
 
     async def serve(self, stop: asyncio.Event) -> None:
         """Main loop: start every runnable run; recover expired leases periodically; drain on stop."""

@@ -151,6 +151,9 @@ class TaskDocumentService:
         if target.exists() and target.read_bytes() != encoded:
             raise RuntimeError("document revision collision")
         if not target.exists():
+            # Recheck the parent immediately before the atomic write. A maintenance
+            # cleanup can remove an empty run subtree between the first mkdir and here.
+            target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix(target.suffix + f".{uuid.uuid4().hex}.tmp")
             temporary.write_bytes(encoded)
             temporary.replace(target)

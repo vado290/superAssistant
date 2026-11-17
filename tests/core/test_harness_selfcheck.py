@@ -35,6 +35,58 @@ def test_migrations_apply_once_in_order(kernel_settings, tmp_path):
         migrate.apply(args, directory)
 
 
+def test_dry_run_does_not_create_a_missing_ledger(kernel_settings, tmp_path):
+    args = migrate.connection_args(kernel_settings)
+    with psycopg.connect(**args) as connection:
+        connection.execute("DROP TABLE assistant.schema_migrations")
+    directory = tmp_path / "preflight"
+    directory.mkdir()
+    (directory / "0001_probe.sql").write_text("SELECT 1;", encoding="utf-8")
+    assert migrate.apply(args, directory, dry_run=True) == ["0001_probe.sql"]
+    with psycopg.connect(**args) as connection:
+        assert connection.execute("SELECT to_regclass('assistant.schema_migrations')").fetchone()[0] is None
+
+
+@pytest.mark.parametrize("failure", [None, "dump", "archive"])
+def test_database_backup_checks_archive_and_keeps_password_out_of_argv(tmp_path, monkeypatch, failure):
+    import subprocess
+    calls = []
+    target = tmp_path / "recovery" / "database.dump"
+    monkeypatch.setattr(migrate, "backup_tools", lambda: ("pg_dump", "pg_restore"))
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        assert "private-test-password" not in argv
+        assert kwargs["check"] and kwargs["timeout"] > 0
+        if argv[0] == "pg_dump":
+            assert kwargs["env"]["PGPASSWORD"] == "private-test-password"
+            if failure == "dump":
+                raise subprocess.CalledProcessError(1, argv)
+            target.write_bytes(b"fake custom archive")
+        elif failure == "archive":
+            raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(migrate.subprocess, "run", run)
+    args = {"host": "test", "port": 5432, "dbname": "isolated", "user": "test", "password": "private-test-password"}
+    if failure:
+        with pytest.raises(subprocess.CalledProcessError):
+            migrate.backup_database(args, target)
+    else:
+        migrate.backup_database(args, target)
+        assert calls[1][0] == ["pg_restore", "--list", str(target)]
+        with pytest.raises(FileExistsError):
+            migrate.backup_database(args, target)
+    assert len(calls) == (1 if failure == "dump" else 2)
+
+
+def test_backup_requires_tools_before_creating_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(migrate.shutil, "which", lambda name: None)
+    target = tmp_path / "database.dump"
+    with pytest.raises(RuntimeError, match="pg_dump and pg_restore"):
+        migrate.backup_database({}, target)
+    assert not target.exists()
+
+
 def test_crlf_recorded_migration_matches_lf_file(kernel_settings, tmp_path):
     directory = tmp_path / "sql"
     directory.mkdir()

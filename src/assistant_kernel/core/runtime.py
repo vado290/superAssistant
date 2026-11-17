@@ -120,6 +120,11 @@ def parse_manifest(text: str, exists: Callable[[str], bool]) -> dict[str, list[d
                 raise ManifestError(f"job {jid}: timeout_seconds must be 10–{MAX_TIMEOUT} and retries 0–5")
             if job["notify"] not in NOTIFY:
                 raise ManifestError(f"the notify of job {jid} must be one of {', '.join(NOTIFY)}")
+            if "idempotent" in raw:   # only "may it run again after contact was lost"; kept out of the spec when false
+                if not isinstance(raw["idempotent"], bool):
+                    raise ManifestError(f"the idempotent of job {jid} must be true or false")
+                if raw["idempotent"]:
+                    job["idempotent"] = True
             if kind == "script":
                 job["entry"] = _relative(raw.get("entry"), f"the entry of job {jid}")
                 if not exists(job["entry"]):

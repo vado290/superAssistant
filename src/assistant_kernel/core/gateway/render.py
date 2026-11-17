@@ -97,6 +97,10 @@ def render_item(item: dict[str, Any]) -> dict[str, Any]:
         buttons = [button(item_id, a) for a in content.get("actions", [])]
         body = f"**⚑ {title}**\n{message}"
         data = content.get("data") or {}
+        if decision == "project_access_request":
+            body += "\n\n" + t("access.request_details",
+                targets=", ".join(data["targets"]), scopes=", ".join(data["read_scopes"]),
+                expires=data["expires_at"], reason=data["reason"])
         followups = data.get("tasks")
         if followups:
             body += "\n\n" + "\n".join(_followup_line(n, f) for n, f in enumerate(followups, 1))

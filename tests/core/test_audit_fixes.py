@@ -40,6 +40,30 @@ async def test_h1_failing_maintenance_does_not_stop_claiming(kernel, sim, monkey
     assert await sim.item("p1") is not None
 
 
+async def test_recovery_rechecks_a_renewed_lease(kernel, sim, monkeypatch):
+    task_id = await start_task(kernel, sim)
+    run = await kernel.claim("w1")
+    assert run and str(run["task_id"]) == task_id
+    async with kernel.db.tx() as c:
+        await c.execute("UPDATE core.runs SET lease_until=now() - interval '1 second' WHERE run_id=%s", (run["run_id"],))
+    from assistant_kernel.core import kernel as kernel_module
+    real_lock = kernel_module.lock_project
+    renewed = []
+
+    async def renew_before_lock(c, project_id):
+        # recover_expired has already scanned the expired row, but has not locked it yet.
+        assert await kernel.heartbeat(run, 3600)
+        renewed.append(True)
+        await real_lock(c, project_id)
+
+    monkeypatch.setattr(kernel_module, "lock_project", renew_before_lock)
+    assert await kernel.recover_expired() == 0
+    assert renewed == [True]
+    async with kernel.db.tx() as c:
+        current = await one(c, "SELECT status FROM core.runs WHERE run_id=%s", (run["run_id"],))
+    assert current["status"] == "running"
+
+
 async def test_m1_a_kernel_error_fails_the_run_at_once(kernel, sim, monkeypatch):
     async def bug(c, task, run, result):
         raise KeyError("missing field")
@@ -213,7 +237,7 @@ async def test_m7_input_of_a_failed_pm_turn_reaches_the_retry(kernel, sim):
     assert "预算控制在 500 以内" in [m["body"].get("text") for m in await kernel.turn_inputs(run)]
 
 
-async def test_m6_a_login_refreshed_mid_call_is_shared_before_the_call_ends(kernel_settings, monkeypatch):
+async def test_m6_a_login_refreshed_mid_call_is_shared_before_the_call_ends(kernel, kernel_settings, monkeypatch):
     from types import SimpleNamespace
 
     from assistant_kernel.core.executors import common
@@ -236,7 +260,7 @@ async def test_m6_a_login_refreshed_mid_call_is_shared_before_the_call_ends(kern
 
     config = SimpleNamespace(agent_id="pm", allowed_tools=(), model=None, reasoning_effort=None, provider=None, context_policy=None,
                              model_context_window_tokens=None, model_auto_compact_token_limit=None, timeout_seconds=60)
-    ctx = SimpleNamespace(services={"settings": kernel_settings, "harness": Harness()}, cancel=asyncio.Event())
+    ctx = SimpleNamespace(kernel=kernel, services={"settings": kernel_settings, "harness": Harness()}, cancel=asyncio.Event())
     run = {"project_id": "p1", "run_id": "r1", "attempt": 1}
     await common.call_model(ctx, run, config, "x", task_id=None, stage=None, session_id=None, tools=frozenset(),
                             sandbox="read-only")

@@ -16,7 +16,7 @@ TEMPLATE = SRC / "core" / "project_template" / "agents"
 # Who reads each core prompt: triage runs with the PM config (executors/triage.py), consult with the Supervisor's;
 # routing is read by both, so it is checked against the narrower Supervisor set.
 PROMPT_ROLES = {"pm-": "pm", "git-delivery": "pm", "runtime-manifest": "pm",
-                "supervisor-": "supervisor", "triage": "pm", "routing": "supervisor"}
+                "supervisor-": "supervisor", "triage": "pm", "routing": "supervisor", "chief-of-staff": "supervisor"}
 
 
 def template_tools(agent: str) -> list[str]:
@@ -32,7 +32,17 @@ def usable() -> dict[str, set[str]]:
 
 
 def named_tools(text: str) -> set[str]:
-    return {t for t in MVP_TOOLS if re.search(rf"\b{t}\b", text)}
+    """Find tools the text presents for use, excluding explicit forbidden-use examples."""
+    found = set()
+    for line in text.splitlines():
+        for tool in MVP_TOOLS:
+            if not re.search(rf"\b{re.escape(tool)}\b", line):
+                continue
+            before = line.split(tool, 1)[0]
+            if re.search(r"\b(?:do not|never|don't|must not|cannot|can't)\b", before, re.I):
+                continue
+            found.add(tool)
+    return found
 
 
 def test_an_empty_tool_list_still_gets_the_platform_tools_and_can_initialise():

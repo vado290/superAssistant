@@ -2,12 +2,14 @@
 name: assistant-operation
 description: "Operating health checklist (read on demand in reviews) — whether the project's released products are running properly: jobs and services, whether data is updated on time, whether anyone uses the output, user feedback; gives the review the facts on how things are running."
 metadata:
-  version: "3.4.0"
+  version: "3.6.0"
   load: {roles: [pm], stages: [evolution], on_demand: true}
   io:
     reads: [charter, map, jobs, digest, change_stream]
     writes: []
   changelog:
+    - "3.6.0 2026-11-16 Apply the same operating method to CoS own outputs; portfolio observations remain permission-scoped and never authorize target operating actions"
+    - "3.5.0 2026-11-16 Clarified that reviews may be user- or event-triggered; queue recovery, lease reconciliation and health checks remain active when scheduled reviews are disabled"
     - "3.4.0 2026-10-23 Written in English, the skills' source language (ROUND6, 0.46.0)"
     - "3.3.1 2026-10-22 Clarified job results, service state changes and the time material was read; a service's last_at is not a health-check heartbeat"
     - "3.3.0 2026-10-22 Tell paused, overdue and unknown apart by the current state; check the version in effect and actual delivery evidence"
@@ -33,6 +35,13 @@ incremental task is not the whole project; without a Kernel release record verif
 naming sources and unknowns — never invent an approval. Release, registration, enabling, successful runs and business
 effect are checked separately; gather facts read-only — never re-run jobs, restart or retire services, or change business
 files yourself.
+
+## Chief of Staff scope
+For a Chief of Staff project, apply this checklist to its own advice, documents and released routines. Observe other
+projects only through authorized Project Access views. Catalog/summary coverage is not runtime health or proof of business
+effect. Name missing scopes and evidence; request further authorized evidence or suggest a follow-up to the owning project.
+Daily jobs and services remain that project's responsibility. Never read its folders, rerun jobs, restart services or change
+its files. Disabling scheduled CoS reviews does not disable Kernel queue recovery or released runtime maintenance.
 
 ## Checklist (item by item; each problem becomes an F with its evidence)
 1. **Jobs**: from the registered state, planned times, last run and statistics, tell enabled, paused, retired, not yet

@@ -111,5 +111,5 @@ def test_other_projects_public_facts_become_candidates(kernel_settings):
     shared.mkdir(parents=True, exist_ok=True)
     (shared / "environment.md").write_text("---\nname: environment\n---\n# 环境\n\n部署在远程主机 prod-1。\n", "utf-8")
     found = shared_candidates(kernel_settings, ["p1", "p2", "p3"], exclude="p1")
-    assert "p2: 公司在上海，约 20 家门店" in found and "只做日报" not in found
+    assert found == ""  # P1: archives have no authorized export view until P3
     assert "prod-1" not in found                                                       # already in the shared files

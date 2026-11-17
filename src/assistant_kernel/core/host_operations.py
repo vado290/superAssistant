@@ -85,7 +85,7 @@ async def authorize(c, project_id, run_id, claim_token, spec):
                                 t.state_revision, r.base, r.purpose FROM core.runs r
                          LEFT JOIN core.tasks t ON t.task_id=r.task_id
                          WHERE r.run_id=%s AND r.project_id=%s AND r.claim_token=%s
-                           AND r.status='running' AND NOT r.cancel_requested""",
+                           AND r.status='running' AND NOT r.cancel_requested AND r.lease_until > now()""",
                     (run_id, project_id, claim_token))
     if row is None:
         raise PermissionError("operation requires a live project run lease")

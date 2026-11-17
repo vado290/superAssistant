@@ -112,6 +112,8 @@ async def test_project_is_created_from_the_approved_charter(kernel, sim, dispatc
     await settle(dispatcher)
     done = await sim.task(task["task_id"])
     assert done["state"] == "completed" and rules.approval_valid(done, "requirements")
+    assert await kernel.daily_operations("sales-report")
+    assert not await kernel.daily_operations("p1")
     vault = kernel_settings.data_root / "vaults" / "sales-report"
     charter = (vault / "knowledge" / "charter.md").read_text("utf-8")
     assert charter.startswith("# 销售日报 · Project charter") and "每天汇总门店销售数据" in charter
@@ -208,3 +210,35 @@ def test_an_existing_vault_is_never_overwritten(kernel_settings):
     fresh = {**spec, "project_id": "fresh-one"}
     first = write_project_files(kernel_settings, fresh)
     assert first[0] == "project.yaml" and write_project_files(kernel_settings, fresh) == []   # repeatable
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("target", ["future-target", "ready-target"])
+async def test_creation_checks_specific_targets_before_reservation(kernel, sim, dispatcher, kernel_settings, enabled, target):
+    from assistant_kernel.core.db import one
+    from assistant_kernel.core.project_access import AccessPolicyError
+    kernel.settings = kernel.settings.model_copy(update={"project_access_enabled": enabled})
+    await kernel.ensure_project("ready-target")
+    markdown = CHARTER.replace("capabilities: []", "capabilities: []\nproject_access:\n  mode: specific\n  targets: [" + target + "]")
+    task = await kernel.create_task("kernel", goal="Create with explicit read targets", origin="user", kind="bootstrap")
+    dispatcher.scripts.add("supervisor:evaluate", next_step("requirements"))
+    await settle(dispatcher)
+    await kernel.act("kernel", (await sim.item("kernel", task["task_id"]))["item_id"], "execute")
+    dispatcher.scripts.add("pm_turn", charter_turn(kernel_settings, task["task_id"], markdown))
+    dispatcher.scripts.add("supervisor:evaluate", {"decision": "propose_project", **CAPS})
+    await settle(dispatcher)
+    item = await sim.item("kernel", task["task_id"])
+    if target == "future-target":
+        with pytest.raises(AccessPolicyError, match="existing active, ready"):
+            await kernel.act("kernel", item["item_id"], "approve")
+        async with kernel.db.tx() as c:
+            assert await one(c, "SELECT 1 FROM core.projects WHERE project_id='sales-report'") is None
+        assert (await sim.item("kernel", task["task_id"]))["item_id"] == item["item_id"]
+    else:
+        await kernel.act("kernel", item["item_id"], "approve")
+        async with kernel.db.tx() as c:
+            assert (await one(c, "SELECT lifecycle_state FROM core.project_lifecycle WHERE project_id='sales-report'"))["lifecycle_state"] == "pending"
+        await settle(dispatcher)
+        assert (await sim.task(task["task_id"]))["state"] == "completed"
+        async with kernel.db.tx() as c:
+            assert (await one(c, "SELECT lifecycle_state FROM core.project_lifecycle WHERE project_id='sales-report'"))["lifecycle_state"] == "ready"

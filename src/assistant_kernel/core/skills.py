@@ -61,9 +61,12 @@ def parse(path: Path) -> Skill:
 
 
 def matches(load: dict[str, Any], *, role: str, stage: str | None = None, purpose: str | None = None,
-            capabilities: frozenset[str] = frozenset(), task_kind: str | None = None) -> bool:
+            capabilities: frozenset[str] = frozenset(), task_kind: str | None = None,
+            project_kind: str = "business") -> bool:
     """roles, capabilities and task_kinds must hold; stages (PM stage turns) or purposes (other runs) either."""
     if load.get("disabled"):
+        return False
+    if load.get("project_kinds") and project_kind not in load["project_kinds"]:
         return False
     if load.get("roles") and role not in load["roles"]:
         return False
@@ -227,12 +230,19 @@ def template_agents(skill: Skill) -> list[str]:
     return [agent for agent in MANAGING_AGENTS if agent in roles]
 
 
-def install_templates(vault: Path, capabilities: frozenset[str]) -> list[str]:
+def applies(skill: Skill, capabilities: frozenset[str], project_kind: str = "business") -> bool:
+    """Whether a template belongs in a project: its capabilities hold and, when it names project_kinds (a method
+    for one kind of project, e.g. chief_of_staff), the project is of that kind (the database kind, never a file)."""
+    kinds = skill.load.get("project_kinds")
+    return set(skill.load.get("capabilities") or ()) <= capabilities and (not kinds or project_kind in kinds)
+
+
+def install_templates(vault: Path, capabilities: frozenset[str], project_kind: str = "business") -> list[str]:
     """Copy the template skills a project can use into each agent's own folder, recording their origin.
     Existing copies stay. Returns "<agent>/<skill>" for each copy made."""
     installed = []
     for skill in template_skills():
-        if not set(skill.load.get("capabilities") or ()) <= capabilities:
+        if not applies(skill, capabilities, project_kind):
             continue
         for agent in template_agents(skill):
             target = agent_skill_dir(vault, agent) / skill.name
@@ -267,12 +277,20 @@ def template_updates(vault: Path) -> list[dict[str, str]]:
     updates, seen = [], set()
     for copy in project_skills(vault):
         template = templates.get(copy.name)
-        if template and template.version != copy.version and (copy.name, copy.version) not in seen:
+        if template and (_content_sha(template.path) != _content_sha(copy.path) or
+                         _support_files(copy.path.parent) != _support_files(template.path.parent)) and (copy.name, copy.version) not in seen:
             seen.add((copy.name, copy.version))
             changelog = re.findall(r'^\s*-\s*"(.+?)"\s*$', template.path.read_text("utf-8"), re.M)[:2]
             updates.append({"name": copy.name, "copy": copy.version, "template": template.version,
                             "changes": "; ".join(changelog) or "(no changelog)"})
     return updates
+
+
+def _support_files(folder: Path) -> dict[str, str]:
+    """Without a full-tree baseline, differing support files must be preserved for explicit adoption."""
+    return {p.relative_to(folder).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in folder.rglob("*") if p.is_file() and p.name != "SKILL.md"
+            and not any(part.startswith(".") or part == "__pycache__" for part in p.relative_to(folder).parts)}
 
 
 def refresh_unmodified(vault: Path, known: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
@@ -286,7 +304,12 @@ def refresh_unmodified(vault: Path, known: dict[str, str] | None = None) -> tupl
     refreshed, kept = [], []
     for copy in project_skills(vault):
         template = templates.get(copy.name)
-        if template is None or copy.version == template.version and copy.load == template.load:
+        if template is None:
+            continue
+        if _support_files(copy.path.parent) != _support_files(template.path.parent):
+            kept.append(copy.name)
+            continue
+        if _content_sha(copy.path) == _content_sha(template.path):
             continue
         baseline = copy.template.get("content_sha")
         unmodified = bool(baseline) and _content_sha(copy.path) == baseline
@@ -298,6 +321,15 @@ def refresh_unmodified(vault: Path, known: dict[str, str] | None = None) -> tupl
     return refreshed, kept
 
 
+def template_fingerprint() -> str:
+    """Content identity for same-version rollouts, including skill support files."""
+    h = hashlib.sha256(b"skill-template-set.v1\0")
+    for path in sorted(TEMPLATE_SKILLS.rglob("*")):
+        if path.is_file() and not any(p.startswith(".") or p == "__pycache__" for p in path.relative_to(TEMPLATE_SKILLS).parts):
+            h.update(path.relative_to(TEMPLATE_SKILLS).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
 OFFERED = "runtime/skill-templates.json"   # which template skills Kernel has already given the project
 
 
@@ -306,13 +338,14 @@ def offered(vault: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text("utf-8")) if path.is_file() else None
 
 
-def sync_templates(vault: Path, capabilities: frozenset[str], version: str) -> dict[str, list[str]]:
+def sync_templates(vault: Path, capabilities: frozenset[str], version: str,
+                   project_kind: str = "business") -> dict[str, list[str]]:
     """Kernel rollout (once per Kernel version): install template skills the project has never been given and
     bring copies it never edited up to date. A skill the project removed after being given it stays removed;
     edited copies are left alone (the weekly review lists them). Returns what changed."""
     record = offered(vault) or {}
     known = set(record.get("offered") or [])
-    applicable = [t for t in template_skills() if set(t.load.get("capabilities") or ()) <= capabilities]
+    applicable = [t for t in template_skills() if applies(t, capabilities, project_kind)]
     installed = []
     for template in applicable:
         if record and template.name in known:
@@ -325,7 +358,7 @@ def sync_templates(vault: Path, capabilities: frozenset[str], version: str) -> d
     refreshed, kept = refresh_unmodified(vault)
     path = vault / OFFERED
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"kernel_version": version, "offered": sorted(known | {t.name for t in applicable})},
+    path.write_text(json.dumps({"kernel_version": version, "template_fingerprint": template_fingerprint(), "offered": sorted(known | {t.name for t in applicable})},
                                ensure_ascii=False, indent=2), "utf-8")
     return {"installed": installed, "refreshed": sorted(set(refreshed)), "kept": sorted(set(kept))}
 

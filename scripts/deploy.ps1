@@ -1,14 +1,15 @@
 <#
 Deploy the current assistant-kernel source: build one wheel, verify it in the
 `test` venv, then install the same wheel into the `prod` venv and restart.
-On a failed health check, prod is reinstalled from the previous wheel.
+Forward-only promotion: back up before mutation; failures retain artifacts for repair.
+Never reinstall an old wheel against a migrated database.
 
   .\scripts\deploy.ps1                 # full deploy
   .\scripts\deploy.ps1 -SkipTests      # skip the test-venv pytest step
   .\scripts\deploy.ps1 -TestOnly       # build + test venv only, prod untouched
 #>
 param(
-    [string]$TestPath = "tests/core",
+    [string]$TestPath = "tests",
     [switch]$SkipTests,
     [switch]$TestOnly
 )
@@ -30,7 +31,10 @@ function InContainer {
     if ($LASTEXITCODE -ne 0) { throw "container command failed: $($args -join ' ')" }
 }
 function Supervisor { docker exec AI supervisorctl -c $SupervisorConf @args }
-function SupervisorDo { Supervisor @args | Out-Host }
+function SupervisorDo {
+    Supervisor @args | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "supervisor command failed: $($args -join ' ')" }
+}
 
 function Ensure-Venv($name) {
     $python = "$Venvs/$name/bin/python"
@@ -47,7 +51,10 @@ function Install-Wheel($python, $wheel) {
 }
 
 function Kernel-Programs {
-    $names = Supervisor status | ForEach-Object { ($_ -split '\s+')[0] } | Where-Object { $_ -like 'kernel-*' }
+    $lines = @(Supervisor status)
+    if ($LASTEXITCODE -notin @(0, 3)) { throw "cannot read Supervisor status" }
+    $names = $lines | ForEach-Object { ($_ -split '\s+')[0] } | Where-Object { $_ -like 'kernel-*' }
+    if (-not $names) { throw "no Kernel programs registered; refusing deployment" }
     $names | ForEach-Object { if ($_ -like '*:*') { ($_ -split ':')[0] + ':*' } else { $_ } } | Select-Object -Unique
 }
 
@@ -70,8 +77,12 @@ function Wait-Ready($expectedVersion) {
 # 0. production runs only committed code (system map analysis 2026-10-22, K2): the wheel is built from the
 #    working copy, so uncommitted or untracked files would reach prod without any record. -TestOnly may run anyway.
 if (-not $TestOnly) {
-    $dirty = git -C (Join-Path $PSScriptRoot "..") status --porcelain
+    $repo = Join-Path $PSScriptRoot ".."
+    $dirty = @(git -C $repo status --porcelain --untracked-files=no)
     if ($LASTEXITCODE -ne 0) { throw "git status failed; cannot confirm the source is committed" }
+    $untracked = @(git -C $repo ls-files --others --exclude-standard -- src tests scripts deploy requirements pyproject.toml LICENSE)
+    if ($LASTEXITCODE -ne 0) { throw "cannot check untracked release inputs" }
+    $dirty += $untracked
     if ($dirty) {
         Write-Host $dirty
         throw "the working copy has uncommitted changes: commit them first (or use -TestOnly to only run the tests)"
@@ -87,9 +98,6 @@ InContainer rm -rf "$Kernel/build"
 InContainer $BasePython -m pip wheel --quiet --no-deps -w "$Wheels/$stamp" $Kernel
 $wheel = "$(docker exec AI sh -c "ls $Wheels/$stamp/*.whl")".Trim()
 if (-not $wheel) { throw "wheel build produced no file" }
-# Only wheels that reached prod (marked .deployed) are rollback targets.
-$previous = "$(docker exec AI sh -c "ls -1d $Wheels/*/.deployed 2>/dev/null | sort | tail -n 1 | xargs -r dirname")".Trim()
-if ($previous) { $previous += "/" }
 
 # 2. verify in the test venv
 Step "install into test venv"
@@ -106,15 +114,26 @@ if ($TestOnly) {
     return
 }
 
-# 3. promote the same wheel to prod
-$prodPython = Ensure-Venv "prod"
+# 3. preflight before any production mutation. Backups are kept outside disposable wheel directories.
+Step "check migration ledger and backup tools"
+InContainer $testPython -m assistant_kernel.core.migrate --dry-run
+InContainer $testPython -m assistant_kernel.core.migrate --check-backup-tools
+$recovery = "$Runtime/release-backups/$stamp"
+InContainer mkdir -m 0700 -p $recovery
+InContainer cp -p $SupervisorConf "$recovery/assistant.conf"
 $programs = @(Kernel-Programs)
-Step "stop: $($programs -join ' ') (running turns drain first)"
-SupervisorDo stop @programs
+$productionChanged = $false
 try {
+    Step "stop: $($programs -join ' ') (running turns drain first)"
+    SupervisorDo stop @programs
+    Step "back up database before migration"
+    InContainer $testPython -m assistant_kernel.core.migrate --backup "$recovery/database.dump"
+    # From here even a failed dependency install may have changed prod. Do not guess compatibility.
+    $productionChanged = $true
+    $prodPython = Ensure-Venv "prod"
     Step "install into prod venv"
     Install-Wheel $prodPython $wheel
-    Step "migrate"
+    Step "migrate (forward only)"
     InContainer $prodPython -m assistant_kernel.core.migrate
     Step "install supervisor config and start"
     InContainer install -m 0644 "$Kernel/deploy/supervisord.conf" $SupervisorConf
@@ -126,18 +145,16 @@ try {
 }
 catch {
     $failure = $_
-    if (-not $previous) { throw "deploy failed and no previous wheel exists; services may be down: $failure" }
-    $old = "$(docker exec AI sh -c "ls ${previous}*.whl")".Trim()
-    $oldVersion = ($old -replace '.*assistant_kernel-([0-9.]+)-.*', '$1')
-    Step "ROLLBACK to $old"
-    SupervisorDo stop @programs
-    Install-Wheel $prodPython $old
-    SupervisorDo restart @programs
-    if (-not (Wait-Ready $oldVersion)) { throw "rollback also failed; services need attention: $failure" }
-    throw "deploy failed, rolled back to $oldVersion (migrations are not reverted): $failure"
+    if (-not $productionChanged) {
+        SupervisorDo start @programs
+        throw "deployment aborted before production installation/migration; original services restarted: $failure"
+    }
+    # A migration may have committed before a later migration failed. Never install an old wheel here.
+    try { SupervisorDo stop @programs }
+    catch { Write-Warning "could not stop all Kernel programs; inspect Supervisor before repair: $_" }
+    throw "FORWARD_REPAIR_REQUIRED; recovery=$recovery; wheel=$wheel; no automatic restore or downgrade: $failure"
 }
 
-# 4. mark this wheel as deployed; keep the two newest deployed wheels, drop everything else
-docker exec AI touch "$Wheels/$stamp/.deployed"
-docker exec AI sh -c "cd $Wheels && for d in */; do [ -f `$d.deployed ] || rm -rf `$d; done; ls -1d */ | sort | head -n -2 | xargs -r rm -rf"
-Write-Output "ASSISTANT_KERNEL_DEPLOYED; version=$version; wheel=$wheel; previous=$previous"
+# 4. mark success. Keep recovery artifacts and failed-release wheels for explicit operator review.
+InContainer touch "$Wheels/$stamp/.deployed"
+Write-Output "ASSISTANT_KERNEL_DEPLOYED; version=$version; wheel=$wheel; recovery=$recovery"

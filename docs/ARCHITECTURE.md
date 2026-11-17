@@ -40,6 +40,25 @@ track). Build output is a candidate bundle (file delivery) or a commit in the ta
 A project-creation task (`bootstrap`) only drafts its charter; approval creates the project. A weekly
 `evolution` task reviews the project and proposes follow-up tasks.
 
+## Chief of Staff
+A Chief of Staff is an independent project with `core.projects.kind=chief_of_staff`, not a third agent role.
+Creation is approved through the normal charter/bootstrap flow, including its Discord category, PM/Supervisor channels
+and gateway routing. `project_kind` in project.yaml is descriptive only. Existing projects remain business/kernel.
+Evolution tasks freeze `review_profile` from database identity: project_review, kernel_maintenance or chief_of_staff.
+CoS is excluded from the ordinary weekly scheduler; `/evolve` queues its bounded manual review. Pending/failed
+projects are not scheduled. There is no operation task kind or permanent active task. Identity grants no cross-project
+read/write access. Portfolio content uses Project Access; without a policy its business-content coverage is unknown.
+The ordinary routing directory exposes public registration only (name, purpose and charter routing section), independently
+of Project Access. CoS uses authorized portfolio views, not legacy handoffs. read_portfolio_snapshot provides bounded current
+catalog/summary pages, policy revision, observation time, omissions and continuation. Every page rechecks lease, expiry,
+active/ready status and policy; a changed revision invalidates the cursor. Background archives are not exported in P1.
+Kernel maintenance separately receives platform counts without goals, messages, errors or private background. Legacy raw
+digest and shared-candidate scans are disabled; authorizations must be configured explicitly, never inferred from
+share_with_kernel. CoS uses the public operation/evolution templates for its own outputs, and observes targets without
+operating them. Template rollout compares Kernel version plus shipped template fingerprint, preserving customized copies.
+Shared background ownership is unchanged pending P3. The first live CoS uses CHIEF_OF_STAFF_CHARTER.md through normal
+bootstrap. The platform project is kind kernel, never a portfolio business target. See CHIEF_OF_STAFF_PLAN.md.
+
 ## Modules (`src/assistant_kernel/core/`)
 | Module | Role |
 |---|---|
@@ -64,9 +83,22 @@ A project-creation task (`bootstrap`) only drafts its charter; approval creates 
 | `i18n.py` | text and language rules (ROUND6): interface text from `i18n/en.yaml`, the English headings Kernel parses (older Chinese headings still found), contract placeholders (`{{heading:key}}`), the language note that makes models reply in the user's language |
 | `sql/` | migrations, applied in order, never edited after applying |
 
+## Dispatcher resource and recovery boundaries
+`CORE_MODEL_CAP` is a per-dispatcher limit for PM, Supervisor, triage and agent jobs. Script jobs and service
+restarts remain claimable when model capacity is full. This is not a cross-process model quota.
+Lease recovery rechecks expiry after locking the project and run. Script cancellation stops its POSIX process
+group and tolerates an already-exited group; this is cleanup, not a sandbox or proof that a disconnected writer
+has stopped. Automatic execution recipes remain outside this change's verified capability boundary.
+
 ## Processes (supervisord in the AI container)
 `kernel-core-dispatcher`, `kernel-core-gateway`, `kernel-api` (health/version and the dashboard at `/dashboard`), plus
 project services `proj-<project>-<service>` registered by the job runtime. Deploy: `scripts/deploy.ps1` (the user runs it).
+Deployment is forward-only for 0.46.4: read-only migration preflight, backup-tool check, stop Kernel writers, database
+backup and Supervisor configuration snapshot, then install/migrate/start. Before production installation changes, an
+aborted backup restarts the original services; thereafter failure stops Kernel services and retains recovery artifacts
+for forward repair. No old-wheel downgrade or automatic database restore. Backup archive listing checks structure, not
+restore completeness. Backups include the configured database, which may be shared: a manual restore needs a separate
+impact decision. Full packaged tests remain required; no new Docker images or containers for verification.
 
 ## Languages (ROUND6)
 The interface is English: Kernel's own text (cards, buttons, notices, commands, the dashboard, files Kernel writes into

@@ -29,6 +29,7 @@ DECISION_ACTIONS = {
     "create_project": ("approve", "reject"),
     "project_task": ("approve", "reject"),
     "grant": ("approve", "reject"),
+    "project_access_request": ("approve", "reject"),
     "followups": ("approve", "reject"),
     "shared_update": ("approve", "reject"),
 }
@@ -72,14 +73,28 @@ async def enqueue(c, project_id: str, run_type: str, purpose: str = "default", r
          Jsonb(base), f"{MUTEX[run_type]}:{project_id}" if run_type in MUTEX else None))
 
 
-async def enqueue_job(c, job: dict[str, Any], planned, *, manual: bool, mutex_key: str) -> dict[str, Any]:
+async def enqueue_job(c, job: dict[str, Any], planned, *, manual: bool, mutex_key: str,
+                      request_key: str | None = None) -> dict[str, Any]:
     """A run of a scheduled job (ROUND3 S3): no task; one at a time per job; retried `retries` times."""
     return await one(
         c, """INSERT INTO core.runs(project_id, run_type, purpose, input, mutex_key, max_attempts)
               VALUES (%s, 'job', 'default', %s, %s, %s) RETURNING *""",
         (job["project_id"], Jsonb({"job_id": job["job_id"], "kind": job["kind"], "spec": job["spec"],
-                                   "planned_at": planned.isoformat(), "manual": manual}),
+                                   "planned_at": planned.isoformat(), "manual": manual,
+                                   **({"request_key": request_key} if request_key else {})}),
          mutex_key, int(job["spec"].get("retries", 1)) + 1))
+
+
+async def cancel_job_runs(c, project_id: str, job_id: str, reason: str, *, keep_spec: dict | None = None) -> None:
+    """Withdraw a job's queued runs: the job was paused or retired, or (keep_spec) they were queued under a spec that
+    is no longer current. Running runs are left alone; their result is recorded as stale (_job_superseded)."""
+    keep = Jsonb(keep_spec) if keep_spec is not None else None
+    rows = await all_rows(c, """UPDATE core.runs SET status='cancelled', ended_at=now()
+        WHERE project_id=%s AND run_type='job' AND status='queued' AND input->>'job_id'=%s
+          AND (%s::jsonb IS NULL OR input->'spec' IS DISTINCT FROM %s::jsonb) RETURNING run_id""",
+                          (project_id, job_id, keep, keep))
+    for row in rows:
+        await event(c, project_id, "job_run_cancelled", run_id=row["run_id"], job_id=job_id, reason=reason)
 
 
 async def notify(c, project_id: str, role: str, text: str, *, task_id=None, chat: dict | None = None,
@@ -135,6 +150,10 @@ async def to_publishing(c, task) -> dict[str, Any]:
 
 
 async def to_bootstrapping(c, task, spec: dict[str, Any]) -> dict[str, Any]:
+    # A failed attempt retains its reservation. Retry must restore pending before completion can activate it.
+    await c.execute("""UPDATE core.project_lifecycle SET lifecycle_state='pending', updated_at=now()
+        WHERE project_id=%s AND lifecycle_state='failed'
+          AND metadata->>'source_task_id'=%s""", (spec["project_id"], str(task["task_id"])))
     task = await _update(c, task, state="bootstrapping")
     await enqueue(c, task["project_id"], "bootstrap", "default", {"spec": spec}, task=task)
     return task
@@ -212,6 +231,9 @@ async def grant_directory(c, project_id: str, directory: dict[str, str], *, reas
     directory, keeping the old row (revoked) as history. Recorded in the change stream."""
     import uuid
     from assistant_kernel.core import grants
+    project = await one(c, "SELECT kind FROM core.projects WHERE project_id=%s", (project_id,))
+    if project and project["kind"] == "chief_of_staff":
+        raise InvalidResult("Chief of Staff cannot receive external directory grants; use Project Access")
     active = await one(c, """SELECT policy_json FROM core.project_grants WHERE project_id=%s AND resource_key=%s
                              AND grant_kind='file' AND status='active'""", (project_id, directory["key"]))
     directory = grants.distinct_key(directory, str(active["policy_json"].get("path")) if active else None)
@@ -324,7 +346,14 @@ async def activate_next(c, project_id: str) -> dict[str, Any] | None:
         return None
     task = await _update(c, task, stage=rules.INITIAL_STAGE[task["kind"]])
     if task["kind"] == "evolution":   # the weekly review runs unattended; the user decides on its proposals
-        return await to_pm(c, task, {"kind": "instruction", "instruction": EVOLUTION_INSTRUCTION})
+        instruction = EVOLUTION_INSTRUCTION
+        if task.get("review_profile") == "chief_of_staff":
+            instruction = ("Review the user's stated goals, constraints and prior advice using this project's records "
+                           "and explicitly authorized project reads. Separate facts, assumptions and missing coverage. "
+                           "Propose concrete next steps in improvement_proposal; do not modify other projects or claim to "
+                           "have sent requests. Use read_portfolio_snapshot for bounded authorized coverage; continue "
+                           "pages as needed.")
+        return await to_pm(c, task, {"kind": "instruction", "instruction": instruction})
     return await to_supervising(c, task, "start")
 
 
@@ -332,12 +361,16 @@ async def create_task(c, project_id: str, *, goal: str, origin: str, kind: str =
                       source_message_id=None, parent_task_id=None,
                       idempotency_key: str | None = None, reason: str | None = None,
                       source_ref: str | None = None) -> dict[str, Any]:
+    profile = None
+    if kind == "evolution":
+        project = await one(c, "SELECT kind FROM core.projects WHERE project_id=%s", (project_id,))
+        profile = rules.review_profile(project["kind"])
     task = await one(
         c, """INSERT INTO core.tasks(project_id, kind, origin, goal, source_message_id,
-                                     parent_task_id, idempotency_key, reason, source_ref, created_at)
-              VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp())
+                                     parent_task_id, idempotency_key, reason, source_ref, review_profile, created_at)
+              VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp())
               ON CONFLICT (idempotency_key) DO NOTHING RETURNING *""",
-        (project_id, kind, origin, goal, source_message_id, parent_task_id, idempotency_key, reason, source_ref))
+        (project_id, kind, origin, goal, source_message_id, parent_task_id, idempotency_key, reason, source_ref, profile))
     if task is None:
         return await one(c, "SELECT * FROM core.tasks WHERE idempotency_key=%s", (idempotency_key,))
     await event(c, project_id, "task_created", task_id=task["task_id"], origin=origin, kind=kind)
@@ -359,6 +392,8 @@ def is_cursor(task: dict[str, Any] | None, run: dict[str, Any]) -> bool:
 async def on_result(c, run: dict[str, Any], result: dict[str, Any]) -> None:
     if run["run_type"] == "supervisor" and run["purpose"] == "consult":
         return await _consult_result(c, run, result)
+    if run["run_type"] == "supervisor" and run["purpose"] == "observe":
+        return await _observe_result(c, run, result)
     if run["run_type"] == "triage":
         return await _triage_result(c, run, result)
     if run["run_type"] == "job":
@@ -403,9 +438,9 @@ async def _pm_result(c, task, run, result) -> None:
                                       summary=summary), task_id=task["task_id"])
     if outcome == "needs_input":
         questions = _checked_questions(result.get("questions"))
-        if any(isinstance(q.get("credential"), dict) for q in questions):
-            # A credential goes straight to the user (Kernel stores the answer, ROUND5 D8); no relay that could drop
-            # the marker.
+        if any(isinstance(q.get("credential"), dict) or isinstance(q.get("model_setup"), dict) for q in questions):
+            # A credential or a model vendor key goes straight to the user (Kernel stores the answer, ROUND5 D8 and
+            # assistant-model-routing); no relay that could drop the marker.
             await to_awaiting(c, task, _raw_pm_questions(task, questions, t("mx.pm_credentials")))
         else:
             await to_supervising(c, task, "pm_questions", pm_questions=questions, summary=summary)
@@ -421,9 +456,20 @@ async def _pm_result(c, task, run, result) -> None:
         raise InvalidResult(f"unknown PM outcome {outcome!r}")
 
 
+async def _newer_input(c, task_id, since) -> dict[str, Any] | None:
+    """The latest user input the task got after `since`: a message written then, or an earlier message attached then
+    (triaged first while daily operations is on)."""
+    return await one(c, """SELECT message_id FROM (
+            SELECT message_id, created_at AS at FROM core.messages
+             WHERE task_id=%s AND direction='inbound' AND created_at > %s
+            UNION ALL
+            SELECT (payload->>'message_id')::uuid, created_at FROM core.task_events
+             WHERE task_id=%s AND kind='input_attached' AND created_at > %s) newer
+        ORDER BY at DESC LIMIT 1""", (task_id, since, task_id, since))
+
+
 async def _supervisor_result(c, task, run, result) -> None:
-    newer = await one(c, """SELECT 1 FROM core.messages WHERE task_id=%s AND direction='inbound'
-                            AND created_at > %s LIMIT 1""", (task["task_id"], run["started_at"]))
+    newer = await _newer_input(c, task["task_id"], run["started_at"])
     if newer:
         # The user said something while Supervisor was thinking: evaluate again with it.
         await enqueue(c, task["project_id"], "supervisor", "evaluate", run["input"], task=task)
@@ -471,8 +517,9 @@ def _supervisor_item(task, run_input: dict[str, Any], result: dict[str, Any]) ->
                               content={"message": message, "questions": _checked_questions(result.get("questions"))})
     if decision == "propose_next":
         target = result.get("target_stage") or task["stage"]
+        gates = result.get("_model_gates") or {}   # Kernel facts from the executor (Model plan, assistant-model-routing)
         if target == "release":
-            error = rules.move_error(task, "release")
+            error = rules.move_error(task, "release") or gates.get(task.get("track", "full"), {}).get("release")
             if error:
                 raise InvalidResult(error)
             bundle = rules.validated_bundle(task)
@@ -486,7 +533,7 @@ def _supervisor_item(task, run_input: dict[str, Any], result: dict[str, Any]) ->
         track = result.get("track") if result.get("track") in rules.TRACKS else task.get("track", "full")
         planned = {**task, "track": track}
         approve = rules.approvals_needed(planned, target)
-        error = rules.move_error(planned, target, approving=tuple(approve))
+        error = rules.move_error(planned, target, approving=tuple(approve)) or gates.get(track, {}).get(target)
         if error:
             raise InvalidResult(error)
         shas = {kind: rules.doc_sha(task, rules.DOCUMENT_FOR_APPROVAL[kind]) for kind in approve}
@@ -594,7 +641,11 @@ async def _finish_publish(c, task, result, reason):
 
 
 async def _bootstrap_result(c, task, run, result) -> None:
+    project_id = str(result.get("project_id") or run["input"].get("spec", {}).get("project_id") or "")
     if result.get("outcome") != "created":
+        if project_id:
+            await c.execute("""UPDATE core.project_lifecycle SET lifecycle_state='failed', updated_at=now()
+                WHERE project_id=%s AND lifecycle_state='pending'""", (project_id,))
         await to_supervising(c, task, "bootstrap_failed", error=result.get("error"))
         return
     channels, guild = result.get("channels") or {}, result.get("guild_id")
@@ -605,6 +656,15 @@ async def _bootstrap_result(c, task, run, result) -> None:
                  (t("mx.project_created", project_id=result["project_id"]) + "\n" + links).rstrip(),
                  task_id=task["task_id"])
     spec = run["input"]["spec"]   # the new project's stream starts with its own creation
+    pending = await one(c, "SELECT 1 FROM core.project_lifecycle WHERE project_id=%s AND lifecycle_state='pending'", (project_id,))
+    if pending:
+        from assistant_kernel.core.project_access import write_policy_in_transaction
+        await write_policy_in_transaction(c, project_id, 0, spec.get("project_access") or {},
+            origin="creation", provenance={"source_task_id": str(task["task_id"])}, allow_expired=True)
+        await c.execute("""UPDATE core.projects SET settings = settings || %s, updated_at=now()
+            WHERE project_id=%s""", (Jsonb({"display_name": spec.get("display_name"), "purpose": spec.get("purpose")}), project_id))
+        await c.execute("""UPDATE core.project_lifecycle SET lifecycle_state='ready', ready_at=now(), updated_at=now()
+            WHERE project_id=%s AND lifecycle_state='pending'""", (project_id,))
     for directory in spec.get("directories") or []:   # checked when the charter was saved, approved with it
         await grant_directory(c, result["project_id"], directory,
                               reason=t("mx.created_grant_reason", purpose=directory["purpose"]))
@@ -619,17 +679,21 @@ async def _bootstrap_result(c, task, run, result) -> None:
     await close(c, task, "completed", "project_created")
 
 
-async def _propose_new_task(c, run, proposal: dict[str, Any], message_id, *, after: str | None = None) -> None:
-    """A "create a new task?" card item; on approval the task queues behind any active one (activate_next)."""
+async def _propose_new_task(c, run, proposal: dict[str, Any], message_id, *, after: str | None = None,
+                            source_ref: str | None = None, job_id: str | None = None) -> None:
+    """A "create a new task?" card item; on approval the task queues behind any active one (activate_next).
+    `source_ref`/`job_id`: the operational observation it came from (daily operations), kept on the task."""
     if not isinstance(proposal, dict) or not str(proposal.get("goal") or "").strip():
         raise InvalidResult("propose_new_task needs a goal")
     text = str(proposal.get("message") or t("mx.new_task_q"))
     if after:
         text += "\n" + t("mx.new_task_after", after=after[:60])
+    data = {"goal": str(proposal["goal"]).strip(), "source_message_id": _str(message_id),
+            **({"source_ref": source_ref} if source_ref else {}), **({"job_id": job_id} if job_id else {})}
     await cards.add_item(c, run["project_id"], cards.new_item(
         target_kind="consultation", target_id=str(run["run_id"]), kind="decision", origin="supervisor",
         content={"decision": "new_task", "message": text, "actions": list(DECISION_ACTIONS["new_task"]),
-                 "data": {"goal": str(proposal["goal"]).strip(), "source_message_id": str(message_id)}}))
+                 "data": data}))
 
 
 async def _review_input_result(c, task, run, result) -> None:
@@ -644,8 +708,7 @@ async def _review_input_result(c, task, run, result) -> None:
         await _propose_new_task(c, run, result["propose_new_task"], run["input"]["message_id"], after=task["goal"])
     if result.get("decision") != "keep":
         item = await _upgrade_item(c, task, item, result.get("item") or {})
-    newer = await one(c, """SELECT message_id FROM core.messages WHERE task_id=%s AND direction='inbound'
-                            AND created_at > %s ORDER BY created_at DESC LIMIT 1""", (task["task_id"], run["started_at"]))
+    newer = await _newer_input(c, task["task_id"], run["started_at"])
     if newer:   # the user wrote again while this review ran: review the card once more
         await enqueue(c, task["project_id"], "supervisor", "review_input", {"message_id": str(newer["message_id"])},
                       task=task, base={"item_id": item["item_id"]})
@@ -752,6 +815,8 @@ async def _triage_result(c, run, result) -> None:
     message = await one(c, "SELECT * FROM core.messages WHERE message_id=%s", (run["input"]["message_id"],))
     chat = {"channel": message["channel"], "chat_id": message["chat_id"], "user_id": message["user_id"]}
     reply = str(result.get("reply") or "").strip()
+    if run["input"].get("context_task_id"):
+        return await _busy_triage_result(c, run, result, message, chat, reply)
     if decision == "chat":
         if not reply:
             raise InvalidResult("chat needs a reply")
@@ -762,8 +827,16 @@ async def _triage_result(c, run, result) -> None:
         kind = "bootstrap" if result.get("task_kind") == "bootstrap" else "delivery"
         if kind == "bootstrap" and "project_management" not in (result.get("_capabilities") or ()):
             raise InvalidResult("only a project with the project_management capability can create projects")
-        active = await one(c, "SELECT kind FROM core.tasks WHERE project_id=%s AND state = ANY(%s)",
+        active = await one(c, "SELECT kind, goal FROM core.tasks WHERE project_id=%s AND state = ANY(%s)",
                            (project_id, list(rules.ACTIVE_STATES)))
+        if kind == "delivery" and active and active["kind"] == "delivery" \
+                and await project_switch(c, project_id, DAILY_OPERATIONS):
+            # Another message started a task while this one was being triaged: this is separate work, so it waits
+            # behind that task as a "new task?" card instead of being merged into it.
+            await _propose_new_task(c, run, {"goal": goal, "message": reply or None}, message["message_id"],
+                                    after=active["goal"])
+            await event(c, project_id, "triaged", decision="new_work", message_id=message["message_id"])
+            return
         if kind == "delivery" and active and active["kind"] == "delivery":
             # Another message started a task while this one was being triaged: it is a supplement to that task.
             await user_input(c, project_id, message)
@@ -788,8 +861,49 @@ async def _triage_result(c, run, result) -> None:
     await event(c, project_id, "triaged", decision=decision, message_id=message["message_id"])
 
 
+BUSY_DECISIONS = ("chat", "supplement", "new_work")
+
+
+async def _busy_triage_result(c, run, result, message, chat, reply: str) -> None:
+    """A message triaged while the project's task was busy (daily operations): chat → answered and left alone;
+    supplement → input of that task; new_work → a "new task?" card that queues behind it. When that task is no
+    longer the active one, the message is routed again by the project's current state (never attached to a task that
+    has ended)."""
+    project_id, decision = run["project_id"], result.get("decision")
+    if decision not in BUSY_DECISIONS:
+        raise InvalidResult(f"with a busy task triage decides {'/'.join(BUSY_DECISIONS)}, not {decision!r}")
+    if decision == "chat":
+        if not reply:
+            raise InvalidResult("chat needs a reply")
+        await notify(c, project_id, "pm", reply, chat=chat)
+        await event(c, project_id, "triaged", decision=decision, message_id=message["message_id"])
+        return
+    proposal = result.get("propose_new_task") if isinstance(result.get("propose_new_task"), dict) else \
+        {"goal": result.get("goal"), "message": reply or None}
+    if decision == "new_work" and not str(proposal.get("goal") or "").strip():
+        raise InvalidResult("new_work needs a goal")
+    active = await one(c, "SELECT * FROM core.tasks WHERE project_id=%s AND state = ANY(%s) FOR UPDATE",
+                       (project_id, list(rules.ACTIVE_STATES)))
+    if message["task_id"] is not None or not active or str(active["task_id"]) != run["input"]["context_task_id"]:
+        await event(c, project_id, "triaged", decision="rerouted", message_id=message["message_id"])
+        if message["task_id"] is None:
+            await user_input(c, project_id, message)
+        return
+    if decision == "supplement":
+        await _attach(c, project_id, message, active, late=True)
+        await notify(c, project_id, "pm", reply or t("mx.attached"), chat=chat, task_id=active["task_id"])
+    else:
+        await _propose_new_task(c, run, proposal, message["message_id"], after=active["goal"])
+        if reply:
+            await notify(c, project_id, "pm", reply, chat=chat)
+    await event(c, project_id, "triaged", decision=decision, message_id=message["message_id"])
+
+
 async def _route(c, source: str, message: dict[str, Any], route: dict[str, Any]):
     """Hand a request to another project's Supervisor; returns the outbound handoff note to link to."""
+    identity = await one(c, "SELECT kind FROM core.projects WHERE project_id=%s", (source,))
+    if identity and identity["kind"] == "chief_of_staff":
+        raise InvalidResult("Chief of Staff coordination is not legacy routing; write a recommendation for the user instead")
     if message["body"].get("images"):
         raise InvalidResult("image requests must be resent in the destination channel")
     target = str(route.get("project_id") or "").strip()
@@ -808,13 +922,61 @@ async def _route(c, source: str, message: dict[str, Any], route: dict[str, Any])
     return note
 
 
+URGENT_FAILURES = 3   # consecutive failures of a job that make its observation urgent (supervisor-observe.md)
+OBSERVATION_ENDS = ("observation_reviewed", "observation_proposed", "observation_task", "observation_closed",
+                    "observation_skipped", "observation_coalesced", "observation_failed")
+
+
+def observation_level(status: str, failures_before: int, spec: dict[str, Any], stale: bool = False) -> str:
+    """Deterministic level of a job result: info is only recorded; review and urgent get a bounded Supervisor review
+    when daily operations is on. Unknown results always need a person."""
+    if stale or status == "succeeded":
+        return "info"
+    if status == "unknown":
+        return "review"
+    if spec.get("notify", "supervisor") == "none":
+        return "info"
+    if failures_before + 1 >= URGENT_FAILURES:
+        return "urgent"
+    return "review" if failures_before == 0 else "info"
+
+
+async def _job_observation(c, run, job_id: str, level: str, **payload: Any) -> None:
+    """Record a job result (job_result event) and, in the same transaction, queue its review when needed: one open
+    review per job at a time (a later one is coalesced), so no separate recovery scan is needed."""
+    row = await one(c, """INSERT INTO core.task_events(project_id, run_id, kind, payload)
+                          VALUES (%s, %s, 'job_result', %s) RETURNING event_id""",
+                    (run["project_id"], run["run_id"], Jsonb({"job_id": job_id, "level": level, **payload})))
+    if level == "info" or not await project_switch(c, run["project_id"], DAILY_OPERATIONS):
+        return
+    event_id = str(row["event_id"])
+    open_review = await one(c, """SELECT 1 FROM core.runs WHERE project_id=%s AND run_type='supervisor'
+        AND purpose='observe' AND status IN ('queued','running','reconciling') AND input->>'job_id'=%s LIMIT 1""",
+                            (run["project_id"], job_id))
+    open_card = any(i["content"].get("decision") == "new_task" and (i["content"].get("data") or {}).get("job_id") == job_id
+                    for i in ((await cards.open_card(c, run["project_id"])) or {}).get("items", []))
+    if open_review or open_card:
+        await event(c, run["project_id"], "observation_coalesced", event_id=event_id, job_id=job_id)
+        return
+    await enqueue(c, run["project_id"], "supervisor", "observe", {"event_id": event_id, "job_id": job_id})
+
+
 async def _job_result(c, run, result) -> None:
-    """A scheduled job finished (ROUND3 S3): record it; post an agent job's result; say so when it recovered."""
+    """A scheduled job finished: persist its result as an operational observation and notify its receivers."""
     job_id, spec = run["input"]["job_id"], run["input"]["spec"]
-    job = await one(c, "SELECT failures FROM core.jobs WHERE project_id=%s AND job_id=%s", (run["project_id"], job_id))
+    job = await one(c, "SELECT failures, status, spec FROM core.jobs WHERE project_id=%s AND job_id=%s",
+                    (run["project_id"], job_id))
+    summary = str(result.get("summary") or "")[:500]
+    stale = _job_superseded(job, spec)
+    await _job_observation(c, run, job_id, "info", status="succeeded", summary=summary,
+                           log=str(result.get("log") or "")[:500], planned_at=run["input"].get("planned_at"),
+                           manual=bool(run["input"].get("manual")), attempt=run["attempt"],
+                           **({"stale": True} if stale else {}))
+    if stale:   # a run of a retired or since-changed job: recorded, but it says nothing about the current job
+        return
     await c.execute("""UPDATE core.jobs SET last_at=now(), last_status='succeeded', last_message=%s, failures=0
                        WHERE project_id=%s AND job_id=%s""",
-                    (str(result.get("summary") or "")[:500], run["project_id"], job_id))
+                    (summary, run["project_id"], job_id))
     if job and job["failures"] and spec.get("notify", "supervisor") != "none":
         await notify(c, run["project_id"], spec.get("notify", "supervisor"), t("mx.job_recovered",
                                                                                  job=job_id))
@@ -823,28 +985,104 @@ async def _job_result(c, run, result) -> None:
         await notify(c, run["project_id"], post, f"📋 {job_id}: {str(result['summary'])[:1800]}")
 
 
+async def _observe_result(c, run, result) -> None:
+    """Supervisor's bounded review of one job observation: note it, or propose a follow-up task the user decides on.
+    It never runs anything itself; the event is re-read here (this project, a job result) and the switch re-checked."""
+    project_id, event_id = run["project_id"], str(run["input"].get("event_id") or "")
+    observed = await one(c, """SELECT payload FROM core.task_events
+                               WHERE event_id=%s::bigint AND project_id=%s AND kind='job_result'""",
+                         (event_id, project_id)) if event_id.isdigit() else None
+    job_id = (observed or {}).get("payload", {}).get("job_id")
+    decision, reply = result.get("decision"), str(result.get("reply") or "").strip()
+    if decision == "skipped" or observed is None or not await project_switch(c, project_id, DAILY_OPERATIONS):
+        await event(c, project_id, "observation_skipped", run_id=run["run_id"], event_id=event_id, job_id=job_id,
+                    reason="not found" if observed is None else "daily operations off" if decision != "skipped"
+                    else str(result.get("reason") or "skipped")[:200])
+        return
+    if decision == "note":
+        if not reply:
+            raise InvalidResult("a noted observation needs a reply")
+        await notify(c, project_id, "supervisor", reply)
+        await event(c, project_id, "observation_reviewed", run_id=run["run_id"], event_id=event_id, job_id=job_id)
+    elif decision == "propose_task":
+        await _propose_new_task(c, run, result.get("propose_new_task"), None,
+                                source_ref=f"observation:{event_id}", job_id=job_id)
+        if reply:
+            await notify(c, project_id, "supervisor", reply)
+        await event(c, project_id, "observation_proposed", run_id=run["run_id"], event_id=event_id, job_id=job_id)
+    else:
+        raise InvalidResult(f"an observation review decides note or propose_task, not {decision!r}")
+
+
+def _job_superseded(job: dict[str, Any] | None, spec: dict[str, Any]) -> bool:
+    """The job this run belonged to was retired or its spec changed after the run was queued."""
+    return job is None or job["status"] == "retired" or job["spec"] != spec
+
+
 async def _job_exhausted(c, run) -> None:
     job_id, spec = run["input"]["job_id"], run["input"]["spec"]
-    reason = str((run.get("error") or {}).get("message", ""))[:300]
-    await c.execute("""UPDATE core.jobs SET last_at=now(), last_status='failed', last_message=%s, failures=failures+1
-                       WHERE project_id=%s AND job_id=%s""", (reason, run["project_id"], job_id))
-    await event(c, run["project_id"], "job_failed", run_id=run["run_id"], job_id=job_id, error=reason)
-    if spec.get("notify", "supervisor") != "none":
-        await notify(c, run["project_id"], spec.get("notify", "supervisor"),
-                     t("mx.job_failed", job=job_id, attempts=run["attempt"], reason=reason))
+    error = run.get("error") or {}
+    reason = str(error.get("message", ""))[:300]
+    # Lost lease of a job that may have side effects: whether its work took effect is unknown (not retried).
+    status = "unknown" if error.get("type") == "result_unknown" else "failed"
+    job = await one(c, "SELECT status, spec, failures FROM core.jobs WHERE project_id=%s AND job_id=%s",
+                    (run["project_id"], job_id))
+    stale = _job_superseded(job, spec)
+    level = observation_level(status, (job or {}).get("failures") or 0, spec, stale)
+    await _job_observation(c, run, job_id, level, status=status, error=reason,
+                           planned_at=run["input"].get("planned_at"), manual=bool(run["input"].get("manual")),
+                           attempt=run["attempt"], **({"stale": True} if stale else {}))
+    if stale:
+        return
+    await c.execute("""UPDATE core.jobs SET last_at=now(), last_status=%s, last_message=%s, failures=failures+1
+                       WHERE project_id=%s AND job_id=%s""", (status, reason, run["project_id"], job_id))
+    if spec.get("notify", "supervisor") != "none" or status == "unknown":   # unknown always needs a person
+        await notify(c, run["project_id"], "supervisor" if spec.get("notify", "supervisor") == "none"
+                     else spec.get("notify", "supervisor"),
+                     t("mx.job_unknown", job=job_id) if status == "unknown"
+                     else t("mx.job_failed", job=job_id, attempts=run["attempt"], reason=reason))
+
+
+async def _triage_exhausted(c, run, reason: str) -> None:
+    """Triage failed for good. A message triaged against a busy task that is still active becomes its input (what
+    happened before daily operations); otherwise the user is told to send it again."""
+    context = run["input"].get("context_task_id")
+    if context:
+        active = await one(c, "SELECT * FROM core.tasks WHERE project_id=%s AND state = ANY(%s) FOR UPDATE",
+                           (run["project_id"], list(rules.ACTIVE_STATES)))
+        message = await one(c, "SELECT * FROM core.messages WHERE message_id=%s", (run["input"]["message_id"],))
+        if active and str(active["task_id"]) == context and message and message["task_id"] is None:
+            await _attach(c, run["project_id"], message, active, late=True)
+            await notify(c, run["project_id"], "pm", t("mx.triage_attached", reason=reason), task_id=active["task_id"])
+            return
+    await notify(c, run["project_id"], "pm", t("mx.triage_failed", reason=reason))
 
 
 async def on_exhausted(c, run: dict[str, Any]) -> None:
     """A run failed after all retries: give the user a way forward instead of getting stuck."""
+    if run["run_type"] == "bootstrap":
+        project_id = str((run.get("input") or {}).get("spec", {}).get("project_id") or "")
+        if project_id:
+            await c.execute("""UPDATE core.project_lifecycle SET lifecycle_state='failed', updated_at=now()
+                WHERE project_id=%s AND lifecycle_state='pending'""", (project_id,))
+        # Continue through the existing task recovery below so the user gets a card.
     if run["run_type"] == "job":
         return await _job_exhausted(c, run)
-    if run["purpose"] in ("review_input", "consult") or run["run_type"] == "triage":
+    if run["purpose"] in ("review_input", "consult", "observe") or run["run_type"] == "triage":
         await event(c, run["project_id"], "side_run_failed", task_id=run["task_id"], run_id=run["run_id"])
         reason = str((run.get("error") or {}).get("message", ""))[:200]
         if run["purpose"] == "consult":   # tell the user instead of failing silently
             await notify(c, run["project_id"], "supervisor", t("mx.consult_failed", reason=reason))
+        elif run["purpose"] == "review_input":   # the card is unchanged and still answerable
+            await notify(c, run["project_id"], "pm", t("mx.review_input_failed", reason=reason),
+                         task_id=run["task_id"])
+        elif run["purpose"] == "observe":   # the observation stays recorded; the next one is reviewed again
+            job_id = run["input"].get("job_id")
+            await event(c, run["project_id"], "observation_failed", run_id=run["run_id"],
+                        event_id=run["input"].get("event_id"), job_id=job_id)
+            await notify(c, run["project_id"], "supervisor", t("mx.observe_failed", job=job_id, reason=reason))
         elif run["run_type"] == "triage":
-            await notify(c, run["project_id"], "pm", t("mx.triage_failed", reason=reason))
+            await _triage_exhausted(c, run, reason)
         return
     task = await load_task(c, run["task_id"])
     if not is_cursor(task, run):
@@ -865,6 +1103,11 @@ async def on_exhausted(c, run: dict[str, Any]) -> None:
 async def on_action(c, project_id: str, item_id: str, action: str, values: dict[str, Any],
                     source_message_id=None, *, settings=None) -> dict[str, Any]:
     card, item = await cards.take_item(c, project_id, item_id)
+    if item["target"]["kind"] == "project_access_request":
+        from assistant_kernel.core.project_access import ProjectAccessService
+        if settings is None:
+            raise PermissionError("project access settings are required")
+        ProjectAccessService(settings).require_enabled()
     # Feedback for weekly evolution: what was shown, what the user did and what they wrote.
     await event(c, project_id, "card_action", interaction_id=card["interaction_id"],
                 task_id=item["target"]["id"] if item["target"]["kind"] == "task" else None,
@@ -881,12 +1124,13 @@ async def on_action(c, project_id: str, item_id: str, action: str, values: dict[
             for question in item["content"].get("questions") or []:
                 answer = answers.get(question["id"])
                 if answer is not None:
-                    shown = t("card.history_credential") if question.get("credential") else str(answer)
+                    shown = t("card.history_credential") if question.get("credential") or question.get("model_setup") \
+                        else str(answer)
                     lines.append(f"{question['text']}\n{shown}")
         elif values.get("text"):
             lines.append(values["text"])
         await notify(c, project_id, "supervisor", "\n\n".join(lines))
-    if item["target"]["kind"] == "consultation":
+    if item["target"]["kind"] in ("consultation", "project_access_request"):
         return await _consultation_action(c, project_id, item, action, source_message_id)
     task = await load_task(c, item["target"]["id"])
     if not task or task["state"] != "awaiting_user":
@@ -897,6 +1141,8 @@ async def on_action(c, project_id: str, item_id: str, action: str, values: dict[
     handler = {"questions": _questions_action, "next_step": _next_step_action, "decision": _decision_action}
     if item["kind"] == "decision":
         return await _decision_action(c, task, item, action, values, source_message_id, settings=settings)
+    if item["kind"] == "next_step":
+        return await _next_step_action(c, task, item, action, values, source_message_id, settings=settings)
     return await handler[item["kind"]](c, task, item, action, values, source_message_id)
 
 
@@ -924,7 +1170,15 @@ async def _questions_action(c, task, item, action, values, source_message_id):
     return await to_supervising(c, task, "answers", **payload)
 
 
-async def _next_step_action(c, task, item, action, values, source_message_id):
+def _model_gate(settings, task, target: str) -> str | None:
+    """The Model plan gate at the moment the user acts (vendor setup may have changed since the card was shown)."""
+    if settings is None:
+        return None
+    from assistant_kernel.core import model_plan
+    return model_plan.gate_errors(settings, task, [target]).get(target)
+
+
+async def _next_step_action(c, task, item, action, values, source_message_id, *, settings=None):
     content = item["content"]
     if action == "revise":
         if not values.get("text"):
@@ -947,6 +1201,10 @@ async def _next_step_action(c, task, item, action, values, source_message_id):
     error = rules.move_error({**task, "approvals": approvals, "track": track}, content["target_stage"])
     if error:
         raise cards.StaleItem(error)
+    error = _model_gate(settings, {**task, "track": track}, content["target_stage"])
+    if error:
+        # The card stays usable (rollback), like an unapproved release: configure the vendor or revise the step.
+        raise ValueError(t("mx.model_gate", error=error))
     task = await _update(c, task, approvals=approvals, track=track)
     result = await to_pm(c, task, {"kind": "instruction", "instruction": content["instruction"],
                                    "inferred_intent": content.get("inferred_intent") or [],
@@ -988,6 +1246,9 @@ async def _decision_action(c, task, item, action, values, source_message_id, *, 
                                     recovery=recovery))
         if rules.validated_bundle(task) != data["bundle_sha"] or rules.doc_sha(task, "review_report") != data["review_sha"]:
             raise cards.StaleItem("the reviewed bundle changed after this card was shown")
+        error = _model_gate(settings, task, "release")
+        if error:   # keep the card (rollback); the reject button stays usable
+            raise ValueError(t("mx.model_gate", error=error))
         approvals = {**task["approvals"], "release": {"bundle_sha": data["bundle_sha"], "review_sha": data["review_sha"],
                                                       "message_id": _str(source_message_id)}}
         return await to_publishing(c, await _update(c, task, approvals=approvals))
@@ -1021,14 +1282,37 @@ async def _decision_action(c, task, item, action, values, source_message_id, *, 
             return await to_supervising(c, task, "create_project_rejected", text=note)
         if rules.doc_sha(task, "task_contract") != data["doc_sha"]:
             raise cards.StaleItem("the charter changed after this card was shown")
-        exists = await one(c, "SELECT 1 FROM core.projects WHERE project_id=%s", (data["spec"]["project_id"],))
+        project_id = data["spec"]["project_id"]
+        exists = await one(c, "SELECT 1 FROM core.projects WHERE project_id=%s", (project_id,))
         if exists:
-            raise ValueError(f"project {data['spec']['project_id']} already exists")
-        # Approving the creation approves the charter: the bootstrap builds the project from exactly this revision.
+            raise ValueError(f"project {project_id} already exists")
+        spec = dict(data["spec"])
+        if settings is not None:
+            from assistant_kernel.core.project_access import normalize_envelope, validate_specific_targets
+            ready_targets = await all_rows(c, """SELECT p.project_id FROM core.projects p
+                JOIN core.project_lifecycle l USING (project_id)
+                WHERE p.status='active' AND p.kind='business' AND l.lifecycle_state='ready'
+                  AND p.project_id <> %s ORDER BY p.project_id""", (project_id,))
+            frozen = [str(row["project_id"]) for row in ready_targets]
+            policy, _ = normalize_envelope(spec.get("project_access") or {},
+                                           source_project_id=project_id, frozen_targets=frozen)
+            await validate_specific_targets(c, policy)
+            spec["project_access"] = policy
+            project_kind = rules.project_spec({**spec, "capabilities": [
+                cap for cap in spec.get("capabilities", []) if cap != "git_delivery"]})["project_kind"]
+            await c.execute("""INSERT INTO core.projects(project_id, kind, settings)
+                VALUES (%s, %s, %s)""", (project_id, project_kind,
+                    Jsonb({"display_name": spec["display_name"], "purpose": spec["purpose"],
+                           "daily_operations": True,
+                           **({"git_push": False} if project_kind == "chief_of_staff" else {})})))
+            await c.execute("""INSERT INTO core.project_lifecycle
+                (project_id, lifecycle_state, registration_origin, metadata)
+                VALUES (%s, 'pending', 'bootstrap', %s)""", (project_id, Jsonb({"source_task_id": str(task["task_id"])})))
+        # Approving the creation approves the charter and its frozen project-level read policy.
         approvals = {**task["approvals"], "requirements": {"doc_sha": data["doc_sha"],
                                                            "message_id": _str(source_message_id)}}
         task = await _update(c, task, approvals=approvals)
-        return await to_bootstrapping(c, task, {**data["spec"], "charter": task["documents"]["task_contract"],
+        return await to_bootstrapping(c, task, {**spec, "charter": task["documents"]["task_contract"],
                                                 "brief": task["documents"].get("domain_brief"),
                                                 "user_id": await _source_user(c, task),
                                                 "source_project": task["project_id"], "task_id": str(task["task_id"])})
@@ -1066,13 +1350,24 @@ def _shared_update(proposal: dict[str, Any]) -> dict[str, str]:
 
 async def _consultation_action(c, project_id, item, action, source_message_id):
     data = item["content"]["data"]
-    if item["content"]["decision"] not in ("new_task", "shared_update", "grant") or action not in ("approve", "reject"):
+    if item["content"]["decision"] not in ("new_task", "shared_update", "grant", "project_access_request") or action not in ("approve", "reject"):
         raise ValueError("consultation items accept approve or reject")
     if item["content"]["decision"] == "grant":
         if action == "approve":
             await grant_directory(c, project_id, data["directory"], reason=data["directory"]["purpose"],
                                   approval_message_id=_str(source_message_id))
         return {}
+    if item["content"]["decision"] == "project_access_request":
+        from assistant_kernel.core.project_access import resolve_request_in_transaction
+        request_id = str(data.get("request_id") or "")
+        identity = await one(c, "SELECT source_project_id FROM core.project_access_requests WHERE request_id=%s", (request_id,))
+        if not identity or identity["source_project_id"] != project_id:
+            raise cards.StaleItem("access request does not belong to this project")
+        result = await resolve_request_in_transaction(
+            c, request_id, "approve" if action == "approve" else "reject",
+            approval_ref=_str(source_message_id), reason="user decision")
+        await event(c, project_id, "project_access_resolved", request_id=request_id, status=result["status"])
+        return {"access_status": result["status"]}
     if item["content"]["decision"] == "shared_update":
         if action == "approve":   # written to the file by vault_sync, outside this transaction
             await event(c, project_id, "shared_update_approved", item_id=item["item_id"], **data)
@@ -1083,10 +1378,18 @@ async def _consultation_action(c, project_id, item, action, source_message_id):
                                              "action": "modify", "note": data["content"][:400]}],
                                    facts={"approval_message_id": _str(source_message_id)})
         return {}
+    observation = data.get("source_ref") if str(data.get("source_ref") or "").startswith("observation:") else None
     if action == "approve":
-        return await create_task(c, project_id, goal=data["goal"], origin="supervisor",
-                                 source_message_id=data["source_message_id"],
+        task = await create_task(c, project_id, goal=data["goal"], origin="supervisor",
+                                 source_message_id=data.get("source_message_id"), source_ref=data.get("source_ref"),
                                  idempotency_key=f"consult-task:{item['item_id']}")
+        if observation:
+            await event(c, project_id, "observation_task", task_id=task["task_id"],
+                        event_id=observation.split(":", 1)[1], job_id=data.get("job_id"))
+        return task
+    if observation:   # the user declined the follow-up: the observation is closed, nothing runs
+        await event(c, project_id, "observation_closed", event_id=observation.split(":", 1)[1],
+                    job_id=data.get("job_id"), item_id=item["item_id"])
     return {}
 
 
@@ -1096,8 +1399,22 @@ def _str(value) -> str | None:
 
 # ---------------------------------------------------------------- user input
 
+DAILY_OPERATIONS = "daily_operations"
+# While the active task is in one of these states a PM-channel message is triaged first (daily operations on):
+# a progress question is answered, a supplement is attached, separate work becomes a "new task?" card.
+BUSY_TRIAGE_STATES = ("pm", "supervising", "validating", "publishing")
+
+
+async def project_switch(c, project_id: str, key: str) -> bool:
+    """An operator-owned project switch in core.projects.settings: on only when it is JSON true."""
+    row = await one(c, "SELECT settings FROM core.projects WHERE project_id=%s", (project_id,))
+    settings = (row or {}).get("settings")
+    return isinstance(settings, dict) and settings.get(key) is True
+
+
 async def user_input(c, project_id: str, message: dict[str, Any], *, triage: bool = True) -> dict[str, Any]:
-    """PM-channel text: supplements the active task; when the project is idle, triage decides (R2.1)."""
+    """PM-channel text: supplements the active task; when the project is idle, triage decides (R2.1). With daily
+    operations on, a message that arrives while the active task is busy is triaged against it first."""
     active = await one(c, "SELECT * FROM core.tasks WHERE project_id=%s AND state = ANY(%s) FOR UPDATE",
                        (project_id, list(rules.ACTIVE_STATES)))
     if active is None:
@@ -1106,8 +1423,21 @@ async def user_input(c, project_id: str, message: dict[str, Any], *, triage: boo
             return {"action": "triage", "run_id": str(run["run_id"])}
         task = await _task_from_message(c, project_id, message, goal=message["body"].get("text", ""))
         return {"action": "created", "task_id": str(task["task_id"])}
+    if triage and active["state"] in BUSY_TRIAGE_STATES and await project_switch(c, project_id, DAILY_OPERATIONS):
+        run = await enqueue(c, project_id, "triage", "default", {"message_id": str(message["message_id"]),
+                                                                  "context_task_id": str(active["task_id"])})
+        return {"action": "triage", "run_id": str(run["run_id"])}
+    return await _attach(c, project_id, message, active)
+
+
+async def _attach(c, project_id: str, message: dict[str, Any], active: dict[str, Any], *,
+                  late: bool = False) -> dict[str, Any]:
+    """Make the message input of the active task. `late`: it was triaged first, so it may reach a run that started
+    after the message was written; the input_attached event lets that run notice it (_newer_input)."""
     await c.execute("UPDATE core.messages SET task_id=%s WHERE message_id=%s",
                     (active["task_id"], message["message_id"]))
+    if late:
+        await event(c, project_id, "input_attached", task_id=active["task_id"], message_id=str(message["message_id"]))
     if active["state"] == "awaiting_user":
         await cards.add_supplement(c, project_id, active["task_id"], message["message_id"])
         item = cards.task_item(await cards.open_card(c, project_id), active["task_id"])

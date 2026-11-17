@@ -22,6 +22,11 @@ The last message of this turn is one JSON object only — no code fences and no 
   Supervisor); Kernel stores the answer in the project's credential store and you receive a "saved" note instead —
   read the value with get_credential when you need it. Never write a credential's value into any document, file or
   message.
+- Model vendor keys are never credential questions. When a Model plan row's vendor is not configured
+  (kernel_model_catalog), ask with a question marked
+  `"model_setup": {"capability": "asr", "purpose": "daily-brief.transcribe", "recommended_vendor": "dashscope"}`
+  (one per vendor; skill assistant-model-routing). It goes straight to the user; Kernel validates and stores the key
+  where no tool can read it, and you receive only "configured", "rejected", "skipped" or "deferred until release".
 - **Documents are edited with tools, not put into the JSON**: this stage's document is a draft. Call
   get_authorized_workspace first, read it with read_task_document and change it with edit_task_document: `edits` is
   `[{"old": original text, "new": new text}]`; old must match the draft exactly and occur once (otherwise it fails at

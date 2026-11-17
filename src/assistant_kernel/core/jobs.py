@@ -21,7 +21,7 @@ from psycopg.types.json import Jsonb
 from assistant_kernel.core import gitdelivery, runtime
 from assistant_kernel.core.i18n import t
 from assistant_kernel.core.db import all_rows, event, lock_project, one
-from assistant_kernel.core.machine import enqueue_job, notify
+from assistant_kernel.core.machine import cancel_job_runs, enqueue_job, notify
 from assistant_kernel.services import schedule_time
 from assistant_kernel.storage import ProjectRuntimeManager
 
@@ -67,6 +67,7 @@ async def apply_manifest(kernel, project_id: str, sha: str | None, parsed: dict[
                 keep = row["next_at"] if kind == "job" and row["spec"].get("schedule") == spec.get("schedule") else due
                 await c.execute("""UPDATE core.jobs SET kind=%s, spec=%s, next_at=%s, manifest_sha=%s, updated_at=now()
                                    WHERE project_id=%s AND job_id=%s""", (kind, Jsonb(spec), keep, "" if kind == "service" else sha, project_id, job_id))
+                await cancel_job_runs(c, project_id, job_id, "spec_changed", keep_spec=spec)
                 changes["updated"].append(job_id)
                 if kind == "service":
                     changes["services"].append(job_id)
@@ -78,6 +79,7 @@ async def apply_manifest(kernel, project_id: str, sha: str | None, parsed: dict[
                 await c.execute("""UPDATE core.jobs SET status='retired', next_at=NULL,
                                    manifest_sha=CASE WHEN kind='service' THEN '' ELSE manifest_sha END, updated_at=now()
                                    WHERE project_id=%s AND job_id=%s""", (project_id, job_id))
+                await cancel_job_runs(c, project_id, job_id, "retired")
                 changes["retired"].append(job_id)
                 if row["kind"] == "service":
                     changes["services_removed"].append(job_id)
@@ -262,17 +264,28 @@ async def set_status(kernel, project_id: str, job_id: str, status: str) -> dict[
         await c.execute("UPDATE core.jobs SET status=%s, next_at=%s, updated_at=now() WHERE project_id=%s AND job_id=%s",
                         (status, due, project_id, job_id))
         await event(c, project_id, "job_status", job_id=job_id, status=status)
+        if status == "paused":   # pausing stops future runs; a run already going is left to finish
+            await cancel_job_runs(c, project_id, job_id, "paused")
         return {**job, "status": status, "next_at": due}
 
 
-async def run_now(kernel, project_id: str, job_id: str) -> dict[str, Any] | None:
-    """Queue one run immediately; the schedule (next time) is not changed."""
+async def run_now(kernel, project_id: str, job_id: str, *, request_key: str | None = None) -> dict[str, Any] | None:
+    """Queue one run immediately; the schedule (next time) is not changed. `request_key` (the command message) makes
+    a redelivered command return the run it already queued. A paused job is refused: {"refused": "paused"}."""
     async with kernel.db.tx() as c:
+        await lock_project(c, project_id)
         job = await one(c, "SELECT * FROM core.jobs WHERE project_id=%s AND job_id=%s AND status <> 'retired'",
                         (project_id, job_id))
         if job is None or job["kind"] != "job":
             return None
-        return await _enqueue(c, job, _now(), manual=True)
+        if request_key:
+            earlier = await one(c, """SELECT * FROM core.runs WHERE project_id=%s AND run_type='job'
+                                      AND input->>'request_key'=%s""", (project_id, request_key))
+            if earlier:
+                return earlier
+        if job["status"] == "paused":
+            return {"refused": "paused"}
+        return await enqueue_job(c, job, _now(), manual=True, mutex_key=_mutex(job), request_key=request_key)
 
 
 async def check_services(kernel) -> int:

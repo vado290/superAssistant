@@ -4,7 +4,7 @@ from assistant_kernel.harness.process_control import terminate_process_group
 
 SOURCE_FLAGS=['-c','features.apps=false','-c','features.plugins=false','-c','features.remote_plugin=false',
               '-c','features.skill_mcp_dependency_install=false']
-CONTROL_ENV=('AI_HOME','ASSISTANT_DATA_ROOT','ASSISTANT_PROVIDER_SECRETS','ASSISTANT_POSTGRES_HOST',
+CONTROL_ENV=('AI_HOME','ASSISTANT_DATA_ROOT','ASSISTANT_PROJECT_ACCESS_ENABLED','ASSISTANT_PROVIDER_SECRETS','ASSISTANT_POSTGRES_HOST',
              'ASSISTANT_POSTGRES_PORT','POSTGRES_DB','POSTGRES_USER','POSTGRES_PASSWORD','RAG_ENV_FILE','PYTHONPATH')
 TOOL_SERVER='assistant_kernel.core.tools'
 

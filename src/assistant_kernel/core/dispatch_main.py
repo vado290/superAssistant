@@ -14,15 +14,29 @@ from assistant_kernel.harness import CodexCliHarness
 from assistant_kernel.storage import ProjectRuntimeManager
 
 
+def env_flag(name: str, default: bool) -> bool:
+    """Strict switch: 1/true/yes/on turn it on, 0/false/no/off turn it off; unset or anything else is the default."""
+    value = os.environ.get(name, "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    if value:
+        logging.warning("%s=%r is not a recognised switch value; using the default (%s)", name, value, default)
+    return default
+
+
 async def _serve() -> None:
     settings = KernelSettings.from_environment()
     cap = os.environ.get("CORE_MODEL_CAP")
+    # The weekly model review is optional (off by default); recovery, idle expiry, vault sync, jobs and services
+    # are maintenance steps of their own and do not depend on it.
     dispatcher = Dispatcher(Kernel(settings), build_executors(),
                             services={"settings": settings,
                                       "harness": CodexCliHarness(ProjectRuntimeManager(settings.data_root))},
                             model_cap=int(cap) if cap else None,
-                            weekly_evolution=os.environ.get("CORE_WEEKLY_EVOLUTION", "1") != "0",
-                            run_jobs=os.environ.get("CORE_RUN_JOBS", "1") != "0")
+                            weekly_evolution=env_flag("CORE_WEEKLY_EVOLUTION", False),
+                            run_jobs=env_flag("CORE_RUN_JOBS", True))
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

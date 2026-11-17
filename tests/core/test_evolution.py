@@ -121,7 +121,12 @@ async def test_review_material_lists_template_updates_and_other_projects(kernel,
         "schema_version: project.v2\nproject_id: p1\nlayout_version: 2\ncapabilities: [kernel_maintenance]\n", "utf-8")
     await kernel.receive("p2", role="pm", text="p2 的一个需求")
     text = await evolution_material(kernel, kernel_settings, "p1")
-    assert "How the other projects are doing" in text and "- p2 (improvements): 1 tasks" in text and "p2 的一个需求" in text
+    assert "How the other projects are doing" not in text  # capability alone cannot grant Kernel identity
+    async with kernel.db.tx() as c:
+        await c.execute("UPDATE core.projects SET kind='kernel' WHERE project_id='p1'")
+    text = await evolution_material(kernel, kernel_settings, "p1")
+    assert "Platform maintenance metrics" in text and '"project_id": "p2", "tasks": 1' in text
+    assert "p2 的一个需求" not in text
 
 
 async def test_effect_reference_error_can_be_corrected_in_operate(kernel, sim, dispatcher, fake_harness):

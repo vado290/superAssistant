@@ -1,4 +1,4 @@
-from .chat import CatalogChatProvider, ChatResult
+from .chat import CatalogChatProvider, ChatResult, PromptCachePolicy
 from .qwen import QwenProvider
 from .volcengine import (
     VolcengineEmbeddingResult,
@@ -8,7 +8,7 @@ from .volcengine import (
 )
 
 __all__ = [
-    "CatalogChatProvider", "ChatResult", "QwenProvider",
+    "CatalogChatProvider", "ChatResult", "PromptCachePolicy", "QwenProvider",
     "VolcengineEmbeddingResult", "VolcengineGateway", "VolcengineTextResult",
     "VolcengineVideoTaskResult",
 ]

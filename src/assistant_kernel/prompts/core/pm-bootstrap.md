@@ -33,9 +33,17 @@ charter; "{{heading:archive}}" goes into the new project's knowledge/background.
 project_id: sales-report        # 3–40 lowercase letters, digits or hyphens, starting with a letter; must not repeat an existing project
 display_name: Sales report
 purpose: one sentence on what the project is for
+project_kind: business         # business (default) or chief_of_staff; kernel is reserved
 capabilities: []                # optional: routing, project_management, shared_context; ordinary projects leave it empty
 delivery: vault-files           # code projects use git-repo (Kernel creates a git repository in the project folder; builds happen on their own branch and are fast-forwarded after approval)
 share_with_kernel: improvements # metrics / improvements / full: what operating information kernel may summarise from this project
+project_access:                  # optional project-level cross-project reads; read-only only, self is the default
+  mode: self                     # self | specific | all | all_except
+  targets: []                    # for specific: exact ready Project IDs
+  excluded: []                  # for all_except: Projects excluded from the current set
+  include_future: false         # for all/all_except: include Projects that become ready later
+  read_scopes: [catalog, summary, tasks, history, documents]
+  expires_at: null              # optional absolute ISO-8601 expiry for the base policy
 directories:                    # optional: outside directories the project needs (only under H:\AI; approving the charter grants them)
   - {path: /home/v/AI/crypto, access: read, purpose: read the strategy code}   # container path (H:\AI is /home/v/AI); access: read / write
 pm_role: |
@@ -44,6 +52,11 @@ supervisor_role: |
   project-specific notes for the Supervisor (a few lines, may be empty)
 ```
 
+- For a user-requested Chief of Staff project, choose project_kind: chief_of_staff. Its PM collects evidence and
+  prepares advice; its Supervisor challenges assumptions and checks alignment with the user's stated goals. P0 allows
+  vault-files, no outside directory grants, and at most project_management as an optional capability. It has no special
+  cross-project permission: use an explicitly approved project_access policy only. Do not enable routing/shared_context
+  or kernel_maintenance. Bootstrap creates its own Discord category and #pm / #supervisor entry points as usual.
 - After every save Kernel checks the creation parameters and shows the result at the end of the document
   ("Kernel check: …"); fix what it reports.
 - The industry research (domain_brief) is written into the new project's `knowledge/domain-brief.md` when the project

@@ -30,6 +30,13 @@ CREATION_SECTION = "creation"     # contract (prompts/core/pm-bootstrap.md): the
 PROJECT_CAPABILITIES = ("routing", "project_management", "shared_context")   # kernel_maintenance: kernel only
 DELIVERIES = ("vault-files", "git-repo")   # git-repo: code delivery (R4a); it turns on the git_delivery capability
 SHARE_LEVELS = ("metrics", "improvements", "full")
+PROJECT_KINDS = ("business", "chief_of_staff")  # kernel identity cannot be created through a charter
+
+
+def review_profile(project_kind: str) -> str:
+    """Review purpose follows platform identity, never editable project capabilities."""
+    return {"business": "project_review", "kernel": "kernel_maintenance",
+            "chief_of_staff": "chief_of_staff"}[project_kind]
 
 
 def project_spec(spec: Any) -> dict[str, Any]:
@@ -42,6 +49,9 @@ def project_spec(spec: Any) -> dict[str, Any]:
     display_name, purpose = str(spec.get("display_name") or "").strip(), str(spec.get("purpose") or "").strip()
     if not display_name or not purpose:
         raise ValueError("display_name or purpose is missing")
+    project_kind = str(spec.get("project_kind") or "business")
+    if project_kind not in PROJECT_KINDS:
+        raise ValueError("project_kind must be business or chief_of_staff")
     capabilities = [str(c) for c in spec.get("capabilities") or []]
     unknown = sorted(set(capabilities) - set(PROJECT_CAPABILITIES))
     if unknown:
@@ -50,11 +60,27 @@ def project_spec(spec: Any) -> dict[str, Any]:
     share = str(spec.get("share_with_kernel") or "improvements")
     if delivery not in DELIVERIES or share not in SHARE_LEVELS:
         raise ValueError(f"delivery must be one of {DELIVERIES} and share_with_kernel one of {SHARE_LEVELS}")
+    if project_kind == "chief_of_staff":
+        if set(capabilities) - {"project_management"}:
+            raise ValueError("chief_of_staff only supports the optional project_management capability")
+        if delivery != "vault-files" or spec.get("directories"):
+            raise ValueError("chief_of_staff uses vault-files without outside directory grants")
     if delivery == "git-repo":   # loads the code-delivery skill
         capabilities.append("git_delivery")
-    return {"project_id": project_id, "display_name": display_name[:80], "purpose": purpose[:500],
+    access = spec.get("project_access") or {}
+    if not isinstance(access, dict):
+        raise ValueError("project_access must be a YAML object")
+    # Creation-time access is project-level and read-only. It is activated only
+    # after bootstrap reaches ready; later requests add bounded supplements.
+    from assistant_kernel.core.project_access import normalize_envelope
+    try:
+        access_policy, _ = normalize_envelope(access, source_project_id=project_id)
+    except Exception as exc:
+        raise ValueError(f"project_access is invalid: {exc}") from exc
+    return {"project_id": project_id, "project_kind": project_kind, "display_name": display_name[:80], "purpose": purpose[:500],
             "capabilities": sorted(set(capabilities)), "delivery": delivery, "share_with_kernel": share,
             "directories": [d for d in spec.get("directories") or [] if isinstance(d, dict)][:10],
+            "project_access": access_policy,
             "pm_role": str(spec.get("pm_role") or "").strip()[:2000],
             "supervisor_role": str(spec.get("supervisor_role") or "").strip()[:2000]}
 

@@ -16,24 +16,11 @@ SHARED_CANDIDATES_HEADING = ("### Facts other projects archived as \"shared\" th
 
 
 def shared_candidates(settings, project_ids: list[str], *, exclude: str) -> str:
-    """Facts other projects archived as shared ("Shared:", "公共：", … — true beyond that project) that the shared
-    files do not hold yet. A plain text check against the shared files: good enough for a person to decide on."""
-    from assistant_kernel.core import skills
-    from assistant_kernel.core.executors.common import charter
-    from assistant_kernel.core.vault_sync import ARCHIVE
-    shared = "\n".join(s.body for s in skills.shared_context(settings.data_root))
-    found = []
-    for project_id in project_ids:
-        if project_id == exclude:
-            continue
-        for line in skills.section_text(charter(settings, project_id), ARCHIVE).splitlines():
-            fact = i18n.shared_fact(line.strip().lstrip("-*").strip())
-            if fact and fact[:20] not in shared:
-                found.append(f"- {project_id}: {fact}")
-    return "\n".join(found[:SHARED_CANDIDATE_LIMIT])
+    """Deprecated: background archives have no authorized export view until P3."""
+    return ""
 
 
-async def evolution_material(kernel, settings, project_id: str) -> str:
+async def evolution_material(kernel, settings, project_id: str, *, run: dict[str, Any] | None = None) -> str:
     """Everything a weekly review reads: the project's own digest, template updates its skill copies have not taken,
     and — for the kernel (kernel_maintenance) — what the other projects share with it (ROUND2 R4b)."""
     from assistant_kernel.core import skills
@@ -51,6 +38,10 @@ async def evolution_material(kernel, settings, project_id: str) -> str:
                    "whose state does not change keeps its last_at, so a long stable run may show an old or empty value; "
                    "that alone does not mean a check is overdue or the service is broken. Without live health evidence "
                    "say it is not verified, judge from the logs and receipts you have, and never invent a check time."
+                 + "\nEach job observation has a level computed by Kernel (info is only recorded; review and urgent are "
+                   "reviewed once when the project has daily operations on) and handling, the last way it ended "
+                   "(observation_reviewed, _proposed, _task, _closed, _skipped, _coalesced, _failed); an empty handling "
+                   "means nobody reviewed it — treat it as open, not as fine."
                  + "\nRun tasks can be read in their generated runs/<task_id>/state.md; for queued tasks use the state and "
                    "reason above; read earlier reviews by proposal_ref. First check for duplicate proposals, overlaps "
                    "and continuation points. If the list is cut off, verify specific items from the map or configuration "
@@ -106,43 +97,19 @@ async def evolution_material(kernel, settings, project_id: str) -> str:
                      "adopt is for you to propose)\n" + "\n".join(
             f"- {u['name']}: project {u['copy']}, template {u['template']}. Latest template changes: {u['changes']}"
             for u in updates))
-    if "kernel_maintenance" in skills.project_config(vault)["capabilities"]:
-        lines = []
-        for other in await kernel.active_projects():
-            if other == project_id:
-                continue
-            share = skills.project_config(runtime.ensure(other).vault_root)["share_with_kernel"]
-            lines.append(summarize_project(other, share, await kernel.project_digest(other)))
-        if lines:
-            parts.append("### How the other projects are doing (by each project's sharing level; use it to find "
-                         "problems several projects share and improve the shared templates)\n" + "\n".join(lines))
-        candidates = shared_candidates(settings, await kernel.active_projects(), exclude=project_id)
-        if candidates:
-            parts.append(SHARED_CANDIDATES_HEADING + candidates)
+    kind = await kernel.project_kind(project_id)
+    if kind in {"kernel", "chief_of_staff"}:
+        from assistant_kernel.core.executors.common import project_catalog_for_run
+        if run is not None:
+            parts.append("### Authorized portfolio (business content is permission-gated)\n"
+                         + await project_catalog_for_run(kernel, settings, run))
+        else:
+            parts.append("### Authorized portfolio\nNot read without a leased invocation; use Project Access tools.")
+    if kind == "kernel" and "kernel_maintenance" in skills.project_config(vault)["capabilities"]:
+        parts.append("### Platform maintenance metrics (counts only; no project content or business-health verdict)\n"
+                     + json.dumps(await kernel.platform_maintenance_metrics(), ensure_ascii=False, default=str))
+        parts.append("Legacy shared-background candidate scanning is disabled pending an authorized P3 export view.")
     return "\n\n".join(parts)
-
-
-def summarize_project(project_id: str, share: str, digest: dict[str, Any]) -> str:
-    tasks = digest["tasks"]
-    done = sum(1 for t in tasks if t["state"] == "completed")
-    stopped = sum(1 for t in tasks if t["state"] == "cancelled")
-    actions = digest["card_actions"]
-    revised = sum(1 for a in actions if a.get("action") == "revise")
-    rejected = sum(1 for a in actions if a.get("action") in ("reject", "stop"))
-    failed = sum(f["n"] for f in digest["failures"])
-    jobs_failed = sum(j["failed"] for j in digest.get("jobs") or [])
-    line = (f"- {project_id} ({share}): {len(tasks)} tasks ({done} completed, {stopped} stopped), "
-            f"{digest['user_messages']} user messages, {revised} card changes, {rejected} declined or stopped, "
-            f"{failed} failed or retried runs, {jobs_failed} job failures")
-    if share in ("improvements", "full"):
-        goals = [t["goal"][:60] for t in tasks if t.get("kind") == "delivery"][:5]
-        if goals:
-            line += "; latest tasks: " + "; ".join(goals)
-    if share == "full":
-        texts = [str(a.get("text"))[:80] for a in actions if a.get("text")][:3]
-        if texts:
-            line += "; the user's change requests: " + "; ".join(texts)
-    return line
 
 
 def render_digest(digest: dict[str, Any]) -> str:
